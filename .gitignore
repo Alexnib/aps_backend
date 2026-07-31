@@ -1,0 +1,34 @@
+# Virtual environment
+venv/
+.venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Environment variables (contains Supabase secrets)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+auth_error.log
+
+# OS junk (macOS / Windows)
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
