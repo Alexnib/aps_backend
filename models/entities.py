@@ -87,6 +87,8 @@ class MezzoResponse(BaseModel):
 class FornitoreBase(BaseModel):
     ragione_sociale: str
     partita_iva: Optional[str] = None
+    citta: Optional[str] = None
+    email: Optional[str] = None
 
 class FornitoreCreate(FornitoreBase):
     pass
@@ -94,6 +96,8 @@ class FornitoreCreate(FornitoreBase):
 class FornitoreUpdate(BaseModel):
     ragione_sociale: Optional[str] = None
     partita_iva: Optional[str] = None
+    citta: Optional[str] = None
+    email: Optional[str] = None
 
 class FornitoreResponse(FornitoreBase):
     id: str

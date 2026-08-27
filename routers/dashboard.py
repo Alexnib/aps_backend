@@ -33,14 +33,17 @@ def get_dashboard_kpi(
         res_mz = query_mz.execute()
         costo_mezzi = sum([float(r["importo_totale"]) for r in res_mz.data if r.get("importo_totale")])
 
-        # Cantieri
+        # Cantieri: i ricavi contano solo le commesse realmente attive (non i preventivi non ancora confermati)
         query_cantieri = supabase.table("cantieri").select("budget_previsto, stato, created_at").eq("company_id", company_id)
         if start_date: query_cantieri = query_cantieri.gte("created_at", start_date)
         if end_date: query_cantieri = query_cantieri.lte("created_at", end_date + "T23:59:59")
         if cantiere_id: query_cantieri = query_cantieri.eq("id", cantiere_id)
         cantieri_res = query_cantieri.execute()
-        
-        ricavi_totali = sum([float(c["budget_previsto"]) for c in cantieri_res.data if c.get("budget_previsto")])
+
+        ricavi_totali = sum([
+            float(c["budget_previsto"]) for c in cantieri_res.data
+            if c.get("budget_previsto") and str(c.get("stato")).lower() != "preventivo"
+        ])
         commesse_attive = len([c for c in cantieri_res.data if str(c.get("stato")).lower() != "chiuso"])
 
         costo_totale = costo_operai + costo_mezzi
@@ -80,13 +83,13 @@ def get_dashboard_charts(
         if cantiere_id: query_mz = query_mz.eq("cantiere_id", cantiere_id)
         res_mz = query_mz.execute()
 
-        # Fetch Cantieri for ricavi
-        query_cantieri = supabase.table("cantieri").select("budget_previsto, created_at, nome_cantiere").eq("company_id", company_id)
+        # Fetch Cantieri for ricavi: solo le commesse realmente attive (non i preventivi)
+        query_cantieri = supabase.table("cantieri").select("budget_previsto, stato, created_at, nome_cantiere").eq("company_id", company_id)
         if start_date: query_cantieri = query_cantieri.gte("created_at", start_date)
         if end_date: query_cantieri = query_cantieri.lte("created_at", end_date + "T23:59:59")
         if cantiere_id: query_cantieri = query_cantieri.eq("id", cantiere_id)
         cantieri_res = query_cantieri.execute()
-        
+
         # Build Trend Data by Day
         trend_dict = defaultdict(lambda: {"costi": 0.0, "ricavi": 0.0, "costi_operai": 0.0, "costi_mezzi": 0.0})
 
@@ -112,44 +115,44 @@ def get_dashboard_charts(
                 trend_dict[day]["costi_mezzi"] += costo
                 dist_dict["Mezzi"] += costo
                 all_dates.add(day)
-                
+
         for c in cantieri_res.data:
-            if c.get("created_at") and c.get("budget_previsto"):
+            if c.get("created_at") and c.get("budget_previsto") and str(c.get("stato")).lower() != "preventivo":
                 day = c["created_at"][:10]
                 ricavo = float(c["budget_previsto"])
                 trend_dict[day]["ricavi"] += ricavo
                 all_dates.add(day)
-                
+
         # Determine the date range to display
         from datetime import datetime, timedelta
-        
+
         if start_date:
             start_date_obj = datetime.strptime(start_date[:10], "%Y-%m-%d")
         elif all_dates:
             start_date_obj = datetime.strptime(min(all_dates), "%Y-%m-%d")
         else:
             start_date_obj = datetime.now() - timedelta(days=30)
-            
+
         if end_date:
             end_date_obj = datetime.strptime(end_date[:10], "%Y-%m-%d")
         elif all_dates:
             end_date_obj = datetime.strptime(max(all_dates), "%Y-%m-%d")
         else:
             end_date_obj = datetime.now()
-            
+
         # Always generate every single day between start and end date
         sorted_dates = []
         curr = start_date_obj
         while curr <= end_date_obj:
             sorted_dates.append(curr.strftime("%Y-%m-%d"))
             curr += timedelta(days=1)
-        
+
         trend_data = []
-        
+
         # Cumulative tracking for Margine
         cumul_costi = 0.0
         cumul_ricavi = 0.0
-        
+
         for d in sorted_dates:
             day_entry = trend_dict.get(d, {})
             day_costi = day_entry.get("costi", 0.0)
@@ -166,16 +169,16 @@ def get_dashboard_charts(
                 "costi_mezzi": day_entry.get("costi_mezzi", 0.0),
                 "margine": cumul_ricavi - cumul_costi # Cumulative (Progressivo) for the line
             })
-        
+
         # Distribution Data
         distribution_data = [{"name": k, "value": v} for k, v in dist_dict.items() if v > 0]
         # Include Materiali even if 0, so it appears in the frontend legend if not filtered
         if not any(d["name"] == "Materiali" for d in distribution_data):
             distribution_data.append({"name": "Materiali", "value": 0.0})
-            
+
         # Sort by value descending
         distribution_data.sort(key=lambda x: x["value"], reverse=True)
-        
+
         return {
             "trend": trend_data,
             "distribution": distribution_data
