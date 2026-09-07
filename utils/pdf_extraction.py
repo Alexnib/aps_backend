@@ -12,7 +12,10 @@ from fastapi import HTTPException
 from .anthropic_client import get_anthropic_client
 
 MODEL = "claude-sonnet-5"
-MAX_TOKENS = 32000
+# Tetto massimo supportato in output da claude-sonnet-5. Si paga solo per i token
+# effettivamente generati (non per il tetto stesso), quindi qui conviene stare al
+# massimo per non troncare i computi metrici piu' lunghi (es. 33 pagine, 200+ voci).
+MAX_TOKENS = 128000
 
 # Prezzi ufficiali per milione di token (claude-sonnet-5)
 PREZZO_INPUT_PER_MTOK = 2.0
