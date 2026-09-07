@@ -28,6 +28,7 @@ class CantiereBase(BaseModel):
     indirizzo_cantiere: Optional[str] = None
     stato: Optional[str] = "Preventivo"
     budget_previsto: Optional[float] = 0.0
+    percentuale_avanzamento: Optional[float] = 100.0
 
 class CantiereCreate(CantiereBase):
     pass
@@ -39,6 +40,7 @@ class CantiereUpdate(BaseModel):
     indirizzo_cantiere: Optional[str] = None
     stato: Optional[str] = None
     budget_previsto: Optional[float] = None
+    percentuale_avanzamento: Optional[float] = None
 
 class CantiereResponse(CantiereBase):
     id: str

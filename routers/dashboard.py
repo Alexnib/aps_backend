@@ -33,20 +33,30 @@ def get_dashboard_kpi(
         res_mz = query_mz.execute()
         costo_mezzi = sum([float(r["importo_totale"]) for r in res_mz.data if r.get("importo_totale")])
 
-        # Cantieri: i ricavi contano solo le commesse realmente attive (non i preventivi non ancora confermati)
-        query_cantieri = supabase.table("cantieri").select("budget_previsto, stato, created_at").eq("company_id", company_id)
+        # Costi totali da materiali consegnati (DDT)
+        query_mat = supabase.table("ddt_materiali").select("importo_totale, data_consegna, cantieri!inner(company_id)").eq("cantieri.company_id", company_id)
+        if start_date: query_mat = query_mat.gte("data_consegna", start_date)
+        if end_date: query_mat = query_mat.lte("data_consegna", end_date)
+        if cantiere_id: query_mat = query_mat.eq("cantiere_id", cantiere_id)
+        res_mat = query_mat.execute()
+        costo_materiali = sum([float(r["importo_totale"]) for r in res_mat.data if r.get("importo_totale")])
+
+        # Cantieri: i ricavi effettivi sono l'importo contrattuale scalato per la % di avanzamento lavori,
+        # e contano solo le commesse realmente attive (non i preventivi non ancora confermati)
+        query_cantieri = supabase.table("cantieri").select("budget_previsto, stato, created_at, percentuale_avanzamento").eq("company_id", company_id)
         if start_date: query_cantieri = query_cantieri.gte("created_at", start_date)
         if end_date: query_cantieri = query_cantieri.lte("created_at", end_date + "T23:59:59")
         if cantiere_id: query_cantieri = query_cantieri.eq("id", cantiere_id)
         cantieri_res = query_cantieri.execute()
 
         ricavi_totali = sum([
-            float(c["budget_previsto"]) for c in cantieri_res.data
+            float(c["budget_previsto"]) * (float(c.get("percentuale_avanzamento") or 0) / 100)
+            for c in cantieri_res.data
             if c.get("budget_previsto") and str(c.get("stato")).lower() != "preventivo"
         ])
         commesse_attive = len([c for c in cantieri_res.data if str(c.get("stato")).lower() != "chiuso"])
 
-        costo_totale = costo_operai + costo_mezzi
+        costo_totale = costo_operai + costo_mezzi + costo_materiali
         margine = ricavi_totali - costo_totale
 
         return {
@@ -83,15 +93,22 @@ def get_dashboard_charts(
         if cantiere_id: query_mz = query_mz.eq("cantiere_id", cantiere_id)
         res_mz = query_mz.execute()
 
-        # Fetch Cantieri for ricavi: solo le commesse realmente attive (non i preventivi)
-        query_cantieri = supabase.table("cantieri").select("budget_previsto, stato, created_at, nome_cantiere").eq("company_id", company_id)
+        # Fetch materiali consegnati (DDT)
+        query_mat = supabase.table("ddt_materiali").select("importo_totale, data_consegna, cantieri!inner(company_id, nome_cantiere)").eq("cantieri.company_id", company_id)
+        if start_date: query_mat = query_mat.gte("data_consegna", start_date)
+        if end_date: query_mat = query_mat.lte("data_consegna", end_date)
+        if cantiere_id: query_mat = query_mat.eq("cantiere_id", cantiere_id)
+        res_mat = query_mat.execute()
+
+        # Fetch Cantieri for ricavi: solo le commesse realmente attive (non i preventivi), scalati per % avanzamento
+        query_cantieri = supabase.table("cantieri").select("budget_previsto, stato, created_at, nome_cantiere, percentuale_avanzamento").eq("company_id", company_id)
         if start_date: query_cantieri = query_cantieri.gte("created_at", start_date)
         if end_date: query_cantieri = query_cantieri.lte("created_at", end_date + "T23:59:59")
         if cantiere_id: query_cantieri = query_cantieri.eq("id", cantiere_id)
         cantieri_res = query_cantieri.execute()
 
         # Build Trend Data by Day
-        trend_dict = defaultdict(lambda: {"costi": 0.0, "ricavi": 0.0, "costi_operai": 0.0, "costi_mezzi": 0.0})
+        trend_dict = defaultdict(lambda: {"costi": 0.0, "ricavi": 0.0, "costi_operai": 0.0, "costi_mezzi": 0.0, "costi_materiali": 0.0})
 
         # Distribution by Resource Type
         dist_dict = {"Operai": 0.0, "Mezzi": 0.0, "Materiali": 0.0}
@@ -116,10 +133,19 @@ def get_dashboard_charts(
                 dist_dict["Mezzi"] += costo
                 all_dates.add(day)
 
+        for r in res_mat.data:
+            if r.get("data_consegna") and r.get("importo_totale"):
+                costo = float(r["importo_totale"])
+                day = r["data_consegna"][:10]
+                trend_dict[day]["costi"] += costo
+                trend_dict[day]["costi_materiali"] += costo
+                dist_dict["Materiali"] += costo
+                all_dates.add(day)
+
         for c in cantieri_res.data:
             if c.get("created_at") and c.get("budget_previsto") and str(c.get("stato")).lower() != "preventivo":
                 day = c["created_at"][:10]
-                ricavo = float(c["budget_previsto"])
+                ricavo = float(c["budget_previsto"]) * (float(c.get("percentuale_avanzamento") or 0) / 100)
                 trend_dict[day]["ricavi"] += ricavo
                 all_dates.add(day)
 
@@ -167,6 +193,7 @@ def get_dashboard_charts(
                 "ricavi": day_ricavi, # Absolute for the day (as bars)
                 "costi_operai": day_entry.get("costi_operai", 0.0),
                 "costi_mezzi": day_entry.get("costi_mezzi", 0.0),
+                "costi_materiali": day_entry.get("costi_materiali", 0.0),
                 "margine": cumul_ricavi - cumul_costi # Cumulative (Progressivo) for the line
             })
 

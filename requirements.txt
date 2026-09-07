@@ -7,3 +7,4 @@ python-dotenv==1.2.1
 python-multipart==0.0.20
 email-validator==2.3.0
 pyjwt==2.13.0
+anthropic==1.4.0

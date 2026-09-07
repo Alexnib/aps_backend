@@ -1,0 +1,259 @@
+import base64
+
+from anthropic import (
+    APIConnectionError,
+    APIStatusError,
+    AuthenticationError,
+    PermissionDeniedError,
+    RateLimitError,
+)
+from fastapi import HTTPException
+
+from .anthropic_client import get_anthropic_client
+
+MODEL = "claude-sonnet-5"
+MAX_TOKENS = 32000
+
+# Prezzi ufficiali per milione di token (claude-sonnet-5)
+PREZZO_INPUT_PER_MTOK = 2.0
+PREZZO_OUTPUT_PER_MTOK = 10.0
+
+
+COMPUTO_TOOL = {
+    "name": "estrai_voci_computo",
+    "description": "Estrae tutte le voci di un computo metrico estimativo da un documento PDF.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "voci": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "n_voce": {
+                            "type": "string",
+                            "description": "Numero identificativo della voce (es. '1', '2.1')",
+                        },
+                        "descrizione_lavorazione": {
+                            "type": "string",
+                            "description": "Descrizione testuale completa della lavorazione",
+                        },
+                        "unita_misura": {
+                            "type": "string",
+                            "description": "Unita' di misura (es. mq, mc, kg, cad, ml)",
+                        },
+                        "quantita_prevista": {
+                            "type": "number",
+                            "description": "Quantita' numerica prevista per la voce",
+                        },
+                        "importo_unitario": {
+                            "type": "number",
+                            "description": "Prezzo unitario in euro",
+                        },
+                        "importo_totale": {
+                            "type": "number",
+                            "description": "Importo totale della voce in euro (quantita' * prezzo unitario)",
+                        },
+                    },
+                    "required": [
+                        "n_voce",
+                        "descrizione_lavorazione",
+                        "unita_misura",
+                        "quantita_prevista",
+                        "importo_unitario",
+                        "importo_totale",
+                    ],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["voci"],
+        "additionalProperties": False,
+    },
+}
+
+DDT_TOOL = {
+    "name": "estrai_ddt",
+    "description": "Estrae i dati strutturati da uno o piu' Documenti Di Trasporto (DDT) contenuti in un PDF.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "documenti": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "fornitore": {
+                            "type": "string",
+                            "description": "Ragione sociale del fornitore/mittente che emette il DDT",
+                        },
+                        "numero_documento": {
+                            "type": "string",
+                            "description": "Numero del documento di trasporto",
+                        },
+                        "data_ddt": {
+                            "type": "string",
+                            "description": "Data del documento in formato YYYY-MM-DD",
+                        },
+                        "destinatario_testo": {
+                            "type": "string",
+                            "description": "Testo completo del destinatario/luogo di consegna cosi' come scritto nel documento (ragione sociale, cantiere, indirizzo)",
+                        },
+                        "righe": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "codice": {
+                                        "type": "string",
+                                        "description": "Codice articolo, se presente. Stringa vuota se assente.",
+                                    },
+                                    "descrizione": {
+                                        "type": "string",
+                                        "description": "Descrizione del materiale",
+                                    },
+                                    "unita_misura": {
+                                        "type": "string",
+                                        "description": "Unita' di misura (es. mq, mc, kg, pz, ml)",
+                                    },
+                                    "quantita": {
+                                        "type": "number",
+                                        "description": "Quantita' consegnata",
+                                    },
+                                },
+                                "required": ["codice", "descrizione", "unita_misura", "quantita"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": [
+                        "fornitore",
+                        "numero_documento",
+                        "data_ddt",
+                        "destinatario_testo",
+                        "righe",
+                    ],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["documenti"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _pdf_document_block(pdf_bytes: bytes) -> dict:
+    return {
+        "type": "document",
+        "source": {
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": base64.b64encode(pdf_bytes).decode("utf-8"),
+        },
+    }
+
+
+def _calcola_costo(usage) -> float:
+    costo_input = (usage.input_tokens / 1_000_000) * PREZZO_INPUT_PER_MTOK
+    costo_output = (usage.output_tokens / 1_000_000) * PREZZO_OUTPUT_PER_MTOK
+    return round(costo_input + costo_output, 4)
+
+
+def _esegui_estrazione(pdf_bytes: bytes, filename: str, tool: dict, prompt: str) -> dict:
+    client = get_anthropic_client()
+
+    try:
+        with client.messages.stream(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": tool["name"]},
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        _pdf_document_block(pdf_bytes),
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
+        ) as stream:
+            message = stream.get_final_message()
+    except AuthenticationError:
+        raise HTTPException(
+            status_code=500,
+            detail="Chiave API Anthropic non valida o non configurata. Contattare l'amministratore.",
+        )
+    except PermissionDeniedError:
+        raise HTTPException(
+            status_code=500,
+            detail="Accesso negato dall'API Anthropic. Verificare i permessi della chiave API.",
+        )
+    except RateLimitError:
+        raise HTTPException(
+            status_code=429,
+            detail="Limite di richieste all'API Anthropic superato. Riprovare tra qualche minuto.",
+        )
+    except APIConnectionError:
+        raise HTTPException(
+            status_code=502,
+            detail="Impossibile contattare il servizio di estrazione. Verificare la connessione internet e riprovare.",
+        )
+    except APIStatusError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Errore del servizio di estrazione (Anthropic): {e.message}",
+        )
+
+    if message.stop_reason == "refusal":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Il modello ha rifiutato di elaborare '{filename}'. Verificare che il PDF sia leggibile e contenga il documento atteso.",
+        )
+
+    if message.stop_reason == "max_tokens":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Il documento '{filename}' e' troppo lungo per essere estratto in un'unica richiesta "
+                "(l'output e' stato troncato). Suddividere il PDF in parti piu' piccole e importarle separatamente."
+            ),
+        )
+
+    tool_use_block = next(
+        (block for block in message.content if block.type == "tool_use"), None
+    )
+    if tool_use_block is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Nessun dato strutturato estratto da '{filename}'. Il documento potrebbe non essere leggibile.",
+        )
+
+    return {
+        "data": tool_use_block.input,
+        "usage": {
+            "input_tokens": message.usage.input_tokens,
+            "output_tokens": message.usage.output_tokens,
+            "costo_stimato_usd": _calcola_costo(message.usage),
+        },
+    }
+
+
+def estrai_computo_metrico(pdf_bytes: bytes, filename: str) -> dict:
+    prompt = (
+        "Analizza questo computo metrico estimativo ed estrai TUTTE le voci presenti nel documento, "
+        "senza ometterne nessuna, usando lo strumento fornito. Mantieni l'ordine originale del documento. "
+        "Se un valore numerico non e' leggibile con certezza, riporta la stima piu' plausibile in base al calcolo "
+        "quantita' * prezzo unitario = importo totale."
+    )
+    return _esegui_estrazione(pdf_bytes, filename, COMPUTO_TOOL, prompt)
+
+
+def estrai_ddt(pdf_bytes: bytes, filename: str) -> dict:
+    prompt = (
+        "Analizza questo documento PDF: puo' contenere uno o piu' Documenti Di Trasporto (DDT). "
+        "Estrai ogni DDT presente come elemento separato nell'array 'documenti', con tutte le relative righe di materiale, "
+        "usando lo strumento fornito. Non unire DDT diversi anche se hanno lo stesso fornitore."
+    )
+    return _esegui_estrazione(pdf_bytes, filename, DDT_TOOL, prompt)
