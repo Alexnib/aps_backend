@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import auth, clienti, cantieri, operai, mezzi, fornitori, rapportini, dashboard, import_pdf, materiali
+from routers import auth, clienti, cantieri, operai, mezzi, fornitori, rapportini, dashboard, import_pdf, materiali, sal
 
 app = FastAPI(title="APS Light API", description="API per l'app gestionale APS Light")
 
@@ -22,6 +22,7 @@ app.include_router(rapportini.router)
 app.include_router(dashboard.router)
 app.include_router(import_pdf.router)
 app.include_router(materiali.router)
+app.include_router(sal.router)
 
 @app.get("/")
 def read_root():

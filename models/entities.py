@@ -45,6 +45,9 @@ class CantiereUpdate(BaseModel):
 class CantiereResponse(CantiereBase):
     id: str
     company_id: str
+    # Derivata dalle voci del computo metrico (media pesata sull'importo), se presenti.
+    # None = nessuna voce importata: si usa percentuale_avanzamento come fallback manuale.
+    percentuale_effettiva: Optional[float] = None
 
 # --- Operai ---
 class OperaioCreate(BaseModel):

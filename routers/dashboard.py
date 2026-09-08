@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
 from utils.supabase_client import supabase
 from utils.auth_deps import get_current_company_id
+from utils.cantieri_helpers import fetch_ricavi_giornalieri, calcola_intervallo_periodo
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -41,19 +42,30 @@ def get_dashboard_kpi(
         res_mat = query_mat.execute()
         costo_materiali = sum([float(r["importo_totale"]) for r in res_mat.data if r.get("importo_totale")])
 
-        # Cantieri: i ricavi effettivi sono l'importo contrattuale scalato per la % di avanzamento lavori,
-        # e contano solo le commesse realmente attive (non i preventivi non ancora confermati)
-        query_cantieri = supabase.table("cantieri").select("budget_previsto, stato, created_at, percentuale_avanzamento").eq("company_id", company_id)
-        if start_date: query_cantieri = query_cantieri.gte("created_at", start_date)
-        if end_date: query_cantieri = query_cantieri.lte("created_at", end_date + "T23:59:59")
+        # Cantieri: i ricavi sono l'importo contrattuale scalato per la % di avanzamento lavori
+        # (pesata sulle voci del computo metrico se presente, altrimenti il valore manuale del
+        # cantiere), e contano solo le commesse realmente attive (non i preventivi). Il cantiere in
+        # se' non si filtra per data (una commessa non "nasce e muore" nel periodo selezionato), ma
+        # il RICAVO si': e' conteggiato solo per la quota maturata nel periodo (stessa logica del
+        # grafico) cosi' il Margine confronta ricavi e costi dello stesso periodo, non ricavi
+        # sempre-totali contro costi-solo-del-periodo.
+        query_cantieri = supabase.table("cantieri").select("id, budget_previsto, stato, percentuale_avanzamento").eq("company_id", company_id)
         if cantiere_id: query_cantieri = query_cantieri.eq("id", cantiere_id)
         cantieri_res = query_cantieri.execute()
 
-        ricavi_totali = sum([
-            float(c["budget_previsto"]) * (float(c.get("percentuale_avanzamento") or 0) / 100)
-            for c in cantieri_res.data
-            if c.get("budget_previsto") and str(c.get("stato")).lower() != "preventivo"
-        ])
+        date_costi = set()
+        for r in res_op.data:
+            if r.get("data_lavoro"):
+                date_costi.add(r["data_lavoro"][:10])
+        for r in res_mz.data:
+            if r.get("data_utilizzo"):
+                date_costi.add(r["data_utilizzo"][:10])
+        for r in res_mat.data:
+            if r.get("data_consegna"):
+                date_costi.add(r["data_consegna"][:10])
+
+        giorni = calcola_intervallo_periodo(start_date, end_date, date_costi, [c["id"] for c in cantieri_res.data])
+        ricavi_totali = sum(fetch_ricavi_giornalieri(cantieri_res.data, giorni).values())
         commesse_attive = len([c for c in cantieri_res.data if str(c.get("stato")).lower() != "chiuso"])
 
         costo_totale = costo_operai + costo_mezzi + costo_materiali
@@ -100,10 +112,10 @@ def get_dashboard_charts(
         if cantiere_id: query_mat = query_mat.eq("cantiere_id", cantiere_id)
         res_mat = query_mat.execute()
 
-        # Fetch Cantieri for ricavi: solo le commesse realmente attive (non i preventivi), scalati per % avanzamento
-        query_cantieri = supabase.table("cantieri").select("budget_previsto, stato, created_at, nome_cantiere, percentuale_avanzamento").eq("company_id", company_id)
-        if start_date: query_cantieri = query_cantieri.gte("created_at", start_date)
-        if end_date: query_cantieri = query_cantieri.lte("created_at", end_date + "T23:59:59")
+        # Fetch Cantieri for ricavi: solo le commesse realmente attive (non i preventivi), scalati per % avanzamento.
+        # Il cantiere non si filtra per data (una commessa non "nasce e muore" nel periodo), ma il
+        # ricavo si': vedi calcola_intervallo_periodo/fetch_ricavi_giornalieri piu' sotto.
+        query_cantieri = supabase.table("cantieri").select("id, budget_previsto, stato, nome_cantiere, percentuale_avanzamento").eq("company_id", company_id)
         if cantiere_id: query_cantieri = query_cantieri.eq("id", cantiere_id)
         cantieri_res = query_cantieri.execute()
 
@@ -113,7 +125,7 @@ def get_dashboard_charts(
         # Distribution by Resource Type
         dist_dict = {"Operai": 0.0, "Mezzi": 0.0, "Materiali": 0.0}
 
-        all_dates = set()
+        date_costi = set()
 
         for r in res_op.data:
             if r.get("data_lavoro") and r.get("importo_totale"):
@@ -122,7 +134,7 @@ def get_dashboard_charts(
                 trend_dict[day]["costi"] += costo
                 trend_dict[day]["costi_operai"] += costo
                 dist_dict["Operai"] += costo
-                all_dates.add(day)
+                date_costi.add(day)
 
         for r in res_mz.data:
             if r.get("data_utilizzo") and r.get("importo_totale"):
@@ -131,7 +143,7 @@ def get_dashboard_charts(
                 trend_dict[day]["costi"] += costo
                 trend_dict[day]["costi_mezzi"] += costo
                 dist_dict["Mezzi"] += costo
-                all_dates.add(day)
+                date_costi.add(day)
 
         for r in res_mat.data:
             if r.get("data_consegna") and r.get("importo_totale"):
@@ -140,38 +152,15 @@ def get_dashboard_charts(
                 trend_dict[day]["costi"] += costo
                 trend_dict[day]["costi_materiali"] += costo
                 dist_dict["Materiali"] += costo
-                all_dates.add(day)
+                date_costi.add(day)
 
-        for c in cantieri_res.data:
-            if c.get("created_at") and c.get("budget_previsto") and str(c.get("stato")).lower() != "preventivo":
-                day = c["created_at"][:10]
-                ricavo = float(c["budget_previsto"]) * (float(c.get("percentuale_avanzamento") or 0) / 100)
-                trend_dict[day]["ricavi"] += ricavo
-                all_dates.add(day)
+        sorted_dates = calcola_intervallo_periodo(start_date, end_date, date_costi, [c["id"] for c in cantieri_res.data])
 
-        # Determine the date range to display
-        from datetime import datetime, timedelta
-
-        if start_date:
-            start_date_obj = datetime.strptime(start_date[:10], "%Y-%m-%d")
-        elif all_dates:
-            start_date_obj = datetime.strptime(min(all_dates), "%Y-%m-%d")
-        else:
-            start_date_obj = datetime.now() - timedelta(days=30)
-
-        if end_date:
-            end_date_obj = datetime.strptime(end_date[:10], "%Y-%m-%d")
-        elif all_dates:
-            end_date_obj = datetime.strptime(max(all_dates), "%Y-%m-%d")
-        else:
-            end_date_obj = datetime.now()
-
-        # Always generate every single day between start and end date
-        sorted_dates = []
-        curr = start_date_obj
-        while curr <= end_date_obj:
-            sorted_dates.append(curr.strftime("%Y-%m-%d"))
-            curr += timedelta(days=1)
+        # Ricavo di ogni giorno ricostruito dallo storico SAL: sale solo quando in quel cantiere e'
+        # stato REALMENTE registrato un SAL con quella data (o prima), non gradualmente giorno per
+        # giorno - cosi' il riepilogo mensile attribuisce il ricavo al mese giusto invece di spalmarlo
+        # su periodi in cui non e' stato fatto nessun sopralluogo.
+        ricavi_per_giorno = fetch_ricavi_giornalieri(cantieri_res.data, sorted_dates)
 
         trend_data = []
 
@@ -182,7 +171,7 @@ def get_dashboard_charts(
         for d in sorted_dates:
             day_entry = trend_dict.get(d, {})
             day_costi = day_entry.get("costi", 0.0)
-            day_ricavi = day_entry.get("ricavi", 0.0)
+            day_ricavi = ricavi_per_giorno.get(d, 0.0)
 
             cumul_costi += day_costi
             cumul_ricavi += day_ricavi

@@ -9,6 +9,7 @@ from models.entities import CantiereCreate, CantiereResponse, CantiereUpdate
 from utils.supabase_client import supabase
 from utils.auth_deps import get_current_company_id
 from utils.errors import raise_db_error
+from utils.cantieri_helpers import fetch_percentuali_effettive
 
 router = APIRouter(prefix="/cantieri", tags=["cantieri"])
 
@@ -33,6 +34,10 @@ def create_cantiere(cantiere: CantiereCreate, company_id: str = Depends(get_curr
 def get_cantieri(company_id: str = Depends(get_current_company_id)):
     try:
         res = supabase.table("cantieri").select("*").eq("company_id", company_id).execute()
+        percentuali = fetch_percentuali_effettive(res.data)
+        for c in res.data:
+            pct, derivata = percentuali.get(c["id"], (0, False))
+            c["percentuale_effettiva"] = pct if derivata else None
         return res.data
     except Exception as e:
         logger.error(f"Error in {__name__}: {str(e)}")

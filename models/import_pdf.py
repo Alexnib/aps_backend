@@ -6,6 +6,7 @@ from typing import List, Optional
 
 class VoceComputoConferma(BaseModel):
     n_voce: Optional[str] = None
+    codice_tariffa: Optional[str] = None
     descrizione_lavorazione: Optional[str] = None
     unita_misura: str
     quantita_prevista: float
@@ -20,10 +21,12 @@ class ConfermaComputoRequest(BaseModel):
 
 class VoceComputoUpdate(BaseModel):
     n_voce: Optional[str] = None
+    codice_tariffa: Optional[str] = None
     descrizione_lavorazione: Optional[str] = None
     unita_misura: Optional[str] = None
     quantita_prevista: Optional[float] = None
     importo_unitario: Optional[float] = None
+    percentuale_completamento: Optional[float] = None
 
 
 # --- DDT ---

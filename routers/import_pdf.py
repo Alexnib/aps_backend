@@ -110,6 +110,7 @@ def conferma_computo(
         {
             "cantiere_id": payload.cantiere_id,
             "n_voce": v.n_voce,
+            "codice_tariffa": v.codice_tariffa,
             "descrizione_lavorazione": v.descrizione_lavorazione,
             "unita_misura": v.unita_misura,
             "quantita_prevista": v.quantita_prevista,
@@ -144,6 +145,20 @@ def get_voci_computo(cantiere_id: str, company_id: str = Depends(get_current_com
         logger.error(f"Errore lettura computo: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/computo/voci")
+def delete_tutte_voci_computo(cantiere_id: str, company_id: str = Depends(get_current_company_id)):
+    _get_cantiere_o_404(cantiere_id, company_id)
+    try:
+        # Lo storico SAL perde senso senza le voci a cui si riferisce: va eliminato insieme al computo.
+        supabase.table("sal").delete().eq("cantiere_id", cantiere_id).execute()
+        res = supabase.table("computo_appalto").delete().eq("cantiere_id", cantiere_id).execute()
+        return {"message": "Computo metrico eliminato", "voci_eliminate": len(res.data)}
+    except Exception as e:
+        logger.error(f"Errore eliminazione completa computo: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise_db_error(e)
 
 
 def _get_voce_computo_o_404(voce_id: str, company_id: str) -> dict:

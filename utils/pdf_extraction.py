@@ -37,6 +37,10 @@ COMPUTO_TOOL = {
                             "type": "string",
                             "description": "Numero identificativo della voce (es. '1', '2.1')",
                         },
+                        "codice_tariffa": {
+                            "type": "string",
+                            "description": "Codice di tariffa/prezzario della voce, se presente (es. 'E.002.002'). Stringa vuota se assente.",
+                        },
                         "descrizione_lavorazione": {
                             "type": "string",
                             "description": "Descrizione testuale completa della lavorazione",
@@ -60,6 +64,7 @@ COMPUTO_TOOL = {
                     },
                     "required": [
                         "n_voce",
+                        "codice_tariffa",
                         "descrizione_lavorazione",
                         "unita_misura",
                         "quantita_prevista",
