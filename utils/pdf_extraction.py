@@ -151,6 +151,68 @@ DDT_TOOL = {
 }
 
 
+PREVENTIVO_TOOL = {
+    "name": "estrai_preventivo_fornitore",
+    "description": "Estrae le voci di un preventivo/listino prezzi di un fornitore da un documento PDF.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "fornitore": {
+                "type": "string",
+                "description": "Ragione sociale del fornitore che ha emesso il preventivo/listino. Stringa vuota se non identificabile.",
+            },
+            "data_offerta": {
+                "type": "string",
+                "description": "Data del preventivo/offerta in formato YYYY-MM-DD, se presente nel documento. Stringa vuota se assente.",
+            },
+            "voci": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "codice_articolo": {
+                            "type": "string",
+                            "description": "Codice articolo del fornitore, se presente. Stringa vuota se assente.",
+                        },
+                        "descrizione": {
+                            "type": "string",
+                            "description": "Descrizione del materiale/articolo",
+                        },
+                        "unita_misura": {
+                            "type": "string",
+                            "description": "Unita' di misura (es. mq, mc, kg, pz, ml)",
+                        },
+                        "prezzo_unitario": {
+                            "type": "number",
+                            "description": "Prezzo unitario in euro. Se il documento riporta solo un importo totale e una quantita', calcolalo dividendo l'uno per l'altra.",
+                        },
+                        "quantita": {
+                            "type": "number",
+                            "description": "Quantita' di riferimento della riga, se presente nel documento (utile per verificare l'importo). 1 se non indicata esplicitamente.",
+                        },
+                        "importo": {
+                            "type": "number",
+                            "description": "Importo totale della riga in euro (quantita' * prezzo unitario), se presente esplicitamente nel documento. 0 se assente.",
+                        },
+                    },
+                    "required": [
+                        "codice_articolo",
+                        "descrizione",
+                        "unita_misura",
+                        "prezzo_unitario",
+                        "quantita",
+                        "importo",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["fornitore", "data_offerta", "voci"],
+        "additionalProperties": False,
+    },
+}
+
+
 def _pdf_document_block(pdf_bytes: bytes) -> dict:
     return {
         "type": "document",
@@ -256,6 +318,16 @@ def estrai_computo_metrico(pdf_bytes: bytes, filename: str) -> dict:
         "quantita' * prezzo unitario = importo totale."
     )
     return _esegui_estrazione(pdf_bytes, filename, COMPUTO_TOOL, prompt)
+
+
+def estrai_preventivo_fornitore(pdf_bytes: bytes, filename: str) -> dict:
+    prompt = (
+        "Analizza questo preventivo/listino prezzi di un fornitore ed estrai TUTTE le voci/articoli "
+        "presenti (codice, descrizione, unita' di misura, prezzo unitario), senza ometterne nessuna, "
+        "usando lo strumento fornito. Mantieni l'ordine originale del documento. Se il prezzo unitario "
+        "non e' indicato esplicitamente ma e' ricavabile da importo totale / quantita', calcolalo."
+    )
+    return _esegui_estrazione(pdf_bytes, filename, PREVENTIVO_TOOL, prompt)
 
 
 def estrai_ddt(pdf_bytes: bytes, filename: str) -> dict:

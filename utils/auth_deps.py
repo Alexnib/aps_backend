@@ -1,5 +1,6 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from supabase_auth.errors import AuthApiError
 from utils.supabase_client import supabase
 import logging
 import traceback
@@ -20,7 +21,23 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 headers={"WWW-Authenticate": "Bearer"},
             )
         return user_response.user
+    except HTTPException:
+        raise
+    except AuthApiError as e:
+        # Token scaduto/revocato/malformato: condizione ATTESA e frequente (gli access token
+        # Supabase durano solo 1 ora), non un bug del server - il frontend intercetta il 401,
+        # rinnova il token da solo e ripete la richiesta in automatico (vedi lib/api.ts). Un log
+        # minimo basta: un traceback completo per un evento di routine intasa i log e nasconde
+        # gli errori veri.
+        logger.info(f"Token non valido in get_current_user (gestito dal refresh automatico del frontend): {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication failed: {str(e)}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     except Exception as e:
+        # Qui invece e' un errore davvero inatteso (es. Supabase irraggiungibile): merita
+        # traceback completo e va tenuto d'occhio.
         err_msg = f"Authentication failed: {str(e)}"
         logger.error(f"Error in get_current_user: {str(e)}")
         logger.error(traceback.format_exc())

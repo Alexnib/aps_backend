@@ -15,6 +15,9 @@ class ArticoloAnagraficaUpdate(BaseModel):
     unita_misura: Optional[str] = None
     importo_unitario: Optional[float] = None
     codice_articolo_fornitore: Optional[str] = None
+    fornitore_id: Optional[str] = None
+    # None esplicito ("cantiere_id": null nel body) = valido per tutte le commesse.
+    cantiere_id: Optional[str] = None
 
 
 class ConsegnaCreate(BaseModel):
@@ -30,3 +33,4 @@ class ConsegnaUpdate(BaseModel):
     data_consegna: Optional[str] = None
     quantita: Optional[float] = None
     importo_totale: Optional[float] = None
+    articolo_fornitore_id: Optional[str] = None

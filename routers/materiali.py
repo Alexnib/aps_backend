@@ -17,7 +17,7 @@ from utils.materiali_helpers import (
 
 router = APIRouter(prefix="/materiali", tags=["materiali"])
 
-ARTICOLO_SELECT = "*, fornitori(id, ragione_sociale), risorse(nome_risorsa)"
+ARTICOLO_SELECT = "*, fornitori(id, ragione_sociale), risorse(nome_risorsa), cantieri(id, nome_cantiere)"
 
 
 def _get_cantiere_o_404(cantiere_id: str, company_id: str) -> dict:
@@ -49,7 +49,7 @@ def _get_fornitore_o_404(fornitore_id: str, company_id: str) -> dict:
 def _get_articolo_o_404(articolo_id: str, company_id: str) -> dict:
     res = (
         supabase.table("articoli_fornitori")
-        .select("id, risorsa_id, fornitore_id")
+        .select("id, risorsa_id, fornitore_id, cantiere_id")
         .eq("id", articolo_id)
         .execute()
     )
@@ -138,6 +138,34 @@ def update_articolo_anagrafica(
     data = payload.model_dump(exclude_unset=True)
     if not data:
         raise HTTPException(status_code=400, detail="Nessun campo da aggiornare")
+
+    if data.get("fornitore_id"):
+        _get_fornitore_o_404(data["fornitore_id"], company_id)
+    if data.get("cantiere_id"):
+        _get_cantiere_o_404(data["cantiere_id"], company_id)
+
+    # Se cambia fornitore e/o commessa di validita', verifica che non esista gia' un'altra riga
+    # identica (stesso fornitore + stesso materiale + stessa commessa): altrimenti si creerebbe un
+    # doppione silenzioso invece di aggiornare quello giusto.
+    if "fornitore_id" in data or "cantiere_id" in data:
+        fornitore_finale = data.get("fornitore_id", articolo["fornitore_id"])
+        cantiere_finale = data["cantiere_id"] if "cantiere_id" in data else articolo.get("cantiere_id")
+
+        query = (
+            supabase.table("articoli_fornitori")
+            .select("id")
+            .eq("fornitore_id", fornitore_finale)
+            .eq("risorsa_id", articolo["risorsa_id"])
+            .neq("id", articolo_id)
+        )
+        query = query.is_("cantiere_id", None) if not cantiere_finale else query.eq("cantiere_id", cantiere_finale)
+        if query.execute().data:
+            raise HTTPException(
+                status_code=400,
+                detail="Esiste gia' un prezzo per questo materiale con questo fornitore"
+                + (" per questa commessa" if cantiere_finale else " valido per tutte le commesse")
+                + ". Modifica o elimina quello esistente invece di crearne uno duplicato.",
+            )
 
     try:
         nome_nuovo = data.get("descrizione_articolo")
@@ -261,6 +289,9 @@ def update_consegna(consegna_id: str, payload: ConsegnaUpdate, company_id: str =
 
     if "quantita" in data and data["quantita"] is not None and data["quantita"] <= 0:
         raise HTTPException(status_code=400, detail="La quantita' deve essere maggiore di zero.")
+
+    if data.get("articolo_fornitore_id"):
+        _get_articolo_o_404(data["articolo_fornitore_id"], company_id)
 
     try:
         res = supabase.table("ddt_materiali").update(data).eq("id", consegna_id).execute()

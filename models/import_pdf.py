@@ -29,6 +29,23 @@ class VoceComputoUpdate(BaseModel):
     percentuale_completamento: Optional[float] = None
 
 
+# --- Preventivo Fornitore ---
+
+class VocePreventivoConferma(BaseModel):
+    codice_articolo: Optional[str] = None
+    descrizione: str
+    unita_misura: str
+    prezzo_unitario: float
+
+
+class ConfermaPreventivoRequest(BaseModel):
+    fornitore_id: str
+    # None = il prezzo vale per tutte le commesse; valorizzato = prezzo dedicato a quel cantiere.
+    cantiere_id: Optional[str] = None
+    data_offerta: Optional[str] = None
+    voci: List[VocePreventivoConferma]
+
+
 # --- DDT ---
 
 class RigaDdtConferma(BaseModel):
@@ -36,6 +53,10 @@ class RigaDdtConferma(BaseModel):
     descrizione: str
     unita_misura: str
     quantita: float
+    # Prezzo unitario indicato/corretto manualmente in fase di revisione. None = usa il prezzo
+    # gia' noto in anagrafica (se esiste); se non esiste ancora nessun prezzo e non viene indicato
+    # qui, la voce viene importata con prezzo 0 e andra' corretta a mano in anagrafica.
+    prezzo_unitario: Optional[float] = None
 
 
 class DocumentoDdtConferma(BaseModel):

@@ -1,4 +1,5 @@
 from pydantic import BaseModel, EmailStr
+from typing import Optional
 
 class CompanyRegister(BaseModel):
     partita_iva: str
@@ -24,6 +25,31 @@ class UserLoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str
     user_id: str
     company_id: str
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
+class AziendaInfo(BaseModel):
+    partita_iva: Optional[str] = None
+    indirizzo: Optional[str] = None
+
+
+class UserMeResponse(BaseModel):
+    id: str
+    email: Optional[str] = None
+    nome: str
+    cognome: str
+    ruolo: str
+    company_id: str
+    azienda: Optional[AziendaInfo] = None
+
+
+class UserUpdateRequest(BaseModel):
+    nome: Optional[str] = None
+    cognome: Optional[str] = None
