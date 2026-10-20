@@ -7,9 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from models.sal import SalCreate
 from utils.supabase_client import supabase
+from utils.letture import leggi_tutte
 from utils.auth_deps import get_current_company_id
 from utils.errors import raise_db_error
-from utils.cantieri_helpers import ricalcola_percentuali_correnti
+from utils.cantieri_helpers import leggi_sal_con_voci, ricalcola_percentuali_correnti
 
 router = APIRouter(prefix="/sal", tags=["sal"])
 
@@ -23,15 +24,7 @@ def _get_cantiere_o_404(cantiere_id: str, company_id: str) -> dict:
 
 def _sal_cronologico(cantiere_id: str) -> list[dict]:
     """Tutti i SAL di un cantiere in ordine cronologico crescente, ciascuno con le sue righe (sal_voci)."""
-    res = (
-        supabase.table("sal")
-        .select("id, data_sal, created_at, sal_voci(voce_id, percentuale_completamento)")
-        .eq("cantiere_id", cantiere_id)
-        .order("data_sal")
-        .order("created_at")
-        .execute()
-    )
-    return res.data or []
+    return leggi_sal_con_voci([cantiere_id])
 
 
 def _conta_modifiche_per_sal(sal_cronologico: list[dict]) -> dict[str, int]:
@@ -64,14 +57,17 @@ def crea_sal(payload: SalCreate, company_id: str = Depends(get_current_company_i
     # ci da' anche la percentuale "corrente" (= ultimo SAL, o 0) per capire dopo
     # quante voci sono state DAVVERO modificate rispetto a prima.
     voce_ids = [p.voce_id for p in payload.percentuali]
-    voci_res = (
-        supabase.table("computo_appalto")
+    voci_cantiere = leggi_tutte(
+        lambda: supabase.table("computo_appalto")
         .select("id, percentuale_completamento")
         .eq("cantiere_id", payload.cantiere_id)
-        .in_("id", voce_ids)
-        .execute()
     )
-    percentuali_precedenti = {v["id"]: (v.get("percentuale_completamento") or 0) for v in voci_res.data or []}
+    # Filtrate qui e non con un .in_() sugli id: con computi da centinaia di voci l'elenco di id
+    # nell'URL della richiesta diventerebbe troppo lungo.
+    richieste = set(voce_ids)
+    percentuali_precedenti = {
+        v["id"]: (v.get("percentuale_completamento") or 0) for v in voci_cantiere if v["id"] in richieste
+    }
     if len(percentuali_precedenti) != len(set(voce_ids)):
         raise HTTPException(status_code=400, detail="Una o piu' voci non appartengono a questo cantiere.")
 
@@ -168,14 +164,13 @@ def dettaglio_sal(sal_id: str, company_id: str = Depends(get_current_company_id)
             for v in s.get("sal_voci") or []:
                 precedenti[v["voce_id"]] = v["percentuale_completamento"]
 
-        voci_res = (
-            supabase.table("sal_voci")
+        righe_sal = leggi_tutte(
+            lambda: supabase.table("sal_voci")
             .select("id, voce_id, percentuale_completamento, computo_appalto(n_voce, descrizione_lavorazione, codice_tariffa)")
             .eq("sal_id", sal_id)
-            .execute()
         )
         voci = []
-        for v in voci_res.data or []:
+        for v in righe_sal:
             precedente = precedenti.get(v["voce_id"], 0)
             voci.append(
                 {
@@ -228,8 +223,9 @@ def elimina_sal(sal_id: str, company_id: str = Depends(get_current_company_id)):
                 detail="Puoi eliminare solo l'ultimo SAL registrato per questo cantiere, per non alterare lo storico.",
             )
 
-        voci_res = supabase.table("sal_voci").select("voce_id").eq("sal_id", sal_id).execute()
-        voce_ids = [v["voce_id"] for v in voci_res.data or []]
+        voce_ids = [
+            v["voce_id"] for v in leggi_tutte(lambda: supabase.table("sal_voci").select("voce_id").eq("sal_id", sal_id))
+        ]
 
         supabase.table("sal").delete().eq("id", sal_id).execute()
 

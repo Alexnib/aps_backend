@@ -1,6 +1,7 @@
 from typing import List, Optional
 
 from utils.supabase_client import supabase
+from utils.letture import leggi_tutte
 
 
 def get_tipologia_materiale_id() -> str:
@@ -17,14 +18,13 @@ def get_tipologia_materiale_id() -> str:
 
 def get_risorse_materiale_ids(company_id: str) -> List[str]:
     tipologia_id = get_tipologia_materiale_id()
-    res = (
-        supabase.table("risorse")
+    righe = leggi_tutte(
+        lambda: supabase.table("risorse")
         .select("id")
         .eq("company_id", company_id)
         .eq("tipologia_risorsa_id", tipologia_id)
-        .execute()
     )
-    return [r["id"] for r in res.data or []]
+    return [r["id"] for r in righe]
 
 
 def find_or_create_risorsa_materiale(nome: str, unita_misura: str, company_id: str) -> str:

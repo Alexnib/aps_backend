@@ -12,6 +12,7 @@ from models.import_pdf import (
     VoceComputoUpdate,
 )
 from utils.supabase_client import supabase
+from utils.letture import leggi_tutte
 from utils.auth_deps import get_current_company_id
 from utils.errors import raise_db_error
 from utils.pdf_extraction import estrai_computo_metrico, estrai_ddt, estrai_preventivo_fornitore
@@ -143,14 +144,9 @@ def conferma_computo(
 def get_voci_computo(cantiere_id: str, company_id: str = Depends(get_current_company_id)):
     _get_cantiere_o_404(cantiere_id, company_id)
     try:
-        res = (
-            supabase.table("computo_appalto")
-            .select("*")
-            .eq("cantiere_id", cantiere_id)
-            .order("created_at")
-            .execute()
+        return leggi_tutte(
+            lambda: supabase.table("computo_appalto").select("*").eq("cantiere_id", cantiere_id).order("created_at")
         )
-        return res.data
     except Exception as e:
         logger.error(f"Errore lettura computo: {str(e)}")
         logger.error(traceback.format_exc())

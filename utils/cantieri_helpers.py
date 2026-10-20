@@ -2,6 +2,38 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from utils.supabase_client import supabase
+from utils.letture import leggi_tutte
+
+
+def leggi_sal_con_voci(cantiere_ids: List[str]) -> List[dict]:
+    """SAL dei cantieri indicati in ordine cronologico (data_sal, poi created_at), ciascuno con le
+    sue righe in "sal_voci".
+
+    Le righe si leggono con una query a parte invece che annidate nella select dei SAL: anche le
+    righe annidate sono soggette al limite di 1000 per richiesta di Supabase, e con un computo
+    grande un singolo SAL ne ha di piu' (verificato: 1100 voci -> 1000 restituite)."""
+    if not cantiere_ids:
+        return []
+    sal = leggi_tutte(
+        lambda: supabase.table("sal")
+        .select("id, cantiere_id, data_sal, created_at")
+        .in_("cantiere_id", cantiere_ids)
+        .order("data_sal")
+        .order("created_at")
+    )
+    righe = leggi_tutte(
+        lambda: supabase.table("sal_voci")
+        .select("sal_id, voce_id, percentuale_completamento, sal!inner(cantiere_id)")
+        .in_("sal.cantiere_id", cantiere_ids)
+    )
+    per_sal: dict = {}
+    for r in righe:
+        per_sal.setdefault(r["sal_id"], []).append(
+            {"voce_id": r["voce_id"], "percentuale_completamento": r["percentuale_completamento"]}
+        )
+    for s in sal:
+        s["sal_voci"] = per_sal.get(s["id"], [])
+    return sal
 
 
 def fetch_percentuali_effettive(cantieri: List[dict]) -> dict:
@@ -22,16 +54,15 @@ def fetch_percentuali_effettive(cantieri: List[dict]) -> dict:
     if not ids:
         return risultato
 
-    voci_res = (
-        supabase.table("computo_appalto")
+    voci = leggi_tutte(
+        lambda: supabase.table("computo_appalto")
         .select("cantiere_id, importo_totale, percentuale_completamento")
         .in_("cantiere_id", ids)
-        .execute()
     )
 
     somma_importo: dict = {}
     somma_produzione: dict = {}
-    for v in voci_res.data or []:
+    for v in voci:
         cid = v["cantiere_id"]
         importo = float(v.get("importo_totale") or 0)
         pct = float(v.get("percentuale_completamento") or 0)
@@ -57,16 +88,8 @@ def ricalcola_percentuali_correnti(cantiere_id: str) -> dict:
     Ritorna {voce_id: percentuale}. Usata sia da crea_sal che da elimina_sal per tenere sempre
     coerente computo_appalto.percentuale_completamento (il valore letto ovunque nell'app).
     """
-    sal_res = (
-        supabase.table("sal")
-        .select("data_sal, created_at, sal_voci(voce_id, percentuale_completamento)")
-        .eq("cantiere_id", cantiere_id)
-        .order("data_sal")
-        .order("created_at")
-        .execute()
-    )
     correnti: dict = {}
-    for s in sal_res.data or []:
+    for s in leggi_sal_con_voci([cantiere_id]):
         for v in s.get("sal_voci") or []:
             vid = v["voce_id"]
             pct = v["percentuale_completamento"] or 0
@@ -93,8 +116,7 @@ def calcola_intervallo_periodo(
     """
     date_riferimento = set(date_costi)
     if not start_date and not end_date and cantiere_ids:
-        sal_res = supabase.table("sal").select("data_sal").in_("cantiere_id", cantiere_ids).execute()
-        for s in sal_res.data or []:
+        for s in leggi_tutte(lambda: supabase.table("sal").select("data_sal").in_("cantiere_id", cantiere_ids)):
             if s.get("data_sal"):
                 date_riferimento.add(s["data_sal"][:10])
 
@@ -148,15 +170,14 @@ def fetch_ricavi_giornalieri(cantieri: List[dict], giorni: List[str]) -> dict:
     if not ids:
         return ricavi_per_giorno
 
-    voci_res = (
-        supabase.table("computo_appalto")
+    voci = leggi_tutte(
+        lambda: supabase.table("computo_appalto")
         .select("id, cantiere_id, importo_totale")
         .in_("cantiere_id", ids)
-        .execute()
     )
     importo_per_voce: dict = {}
     totale_importo_cantiere: dict = {}
-    for v in voci_res.data or []:
+    for v in voci:
         importo = float(v.get("importo_totale") or 0)
         importo_per_voce[v["id"]] = importo
         totale_importo_cantiere[v["cantiere_id"]] = totale_importo_cantiere.get(v["cantiere_id"], 0.0) + importo
@@ -165,15 +186,7 @@ def fetch_ricavi_giornalieri(cantieri: List[dict], giorni: List[str]) -> dict:
 
     sal_per_cantiere: dict = {}
     if cantieri_con_computo:
-        sal_res = (
-            supabase.table("sal")
-            .select("cantiere_id, data_sal, created_at, sal_voci(voce_id, percentuale_completamento)")
-            .in_("cantiere_id", list(cantieri_con_computo))
-            .order("data_sal")
-            .order("created_at")
-            .execute()
-        )
-        for s in sal_res.data or []:
+        for s in leggi_sal_con_voci(list(cantieri_con_computo)):
             pcts = {v["voce_id"]: v["percentuale_completamento"] for v in (s.get("sal_voci") or [])}
             sal_per_cantiere.setdefault(s["cantiere_id"], []).append((s["data_sal"], pcts))
         for lista in sal_per_cantiere.values():

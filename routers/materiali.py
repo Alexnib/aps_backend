@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from models.materiali import ArticoloAnagraficaCreate, ArticoloAnagraficaUpdate, ConsegnaCreate, ConsegnaUpdate
 from utils.supabase_client import supabase
+from utils.letture import leggi_tutte
 from utils.auth_deps import get_current_company_id
 from utils.errors import raise_db_error
 from utils.materiali_helpers import (
@@ -79,14 +80,12 @@ def get_anagrafica(company_id: str = Depends(get_current_company_id)):
         if not risorsa_ids:
             return []
 
-        res = (
-            supabase.table("articoli_fornitori")
+        return leggi_tutte(
+            lambda: supabase.table("articoli_fornitori")
             .select(ARTICOLO_SELECT)
             .in_("risorsa_id", risorsa_ids)
             .order("created_at", desc=True)
-            .execute()
         )
-        return res.data
     except Exception as e:
         logger.error(f"Errore lettura anagrafica materiali: {str(e)}")
         logger.error(traceback.format_exc())
@@ -216,14 +215,12 @@ CONSEGNA_SELECT = (
 def get_consegne_cantiere(cantiere_id: str, company_id: str = Depends(get_current_company_id)):
     _get_cantiere_o_404(cantiere_id, company_id)
     try:
-        res = (
-            supabase.table("ddt_materiali")
+        return leggi_tutte(
+            lambda: supabase.table("ddt_materiali")
             .select(CONSEGNA_SELECT)
             .eq("cantiere_id", cantiere_id)
             .order("data_consegna", desc=True)
-            .execute()
         )
-        return res.data
     except Exception as e:
         logger.error(f"Errore lettura consegne cantiere: {str(e)}")
         logger.error(traceback.format_exc())

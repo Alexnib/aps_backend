@@ -4,6 +4,7 @@ from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
 from utils.supabase_client import supabase
+from utils.letture import leggi_tutte
 from utils.auth_deps import get_current_company_id
 from utils.cantieri_helpers import fetch_ricavi_giornalieri, calcola_intervallo_periodo
 
@@ -19,28 +20,34 @@ def get_dashboard_kpi(
 ):
     try:
         # Costi totali da rapportini operai
-        query_op = supabase.table("rapportini_operai").select("importo_totale, data_lavoro, operai!inner(company_id)").eq("operai.company_id", company_id)
-        if start_date: query_op = query_op.gte("data_lavoro", start_date)
-        if end_date: query_op = query_op.lte("data_lavoro", end_date)
-        if cantiere_id: query_op = query_op.eq("cantiere_id", cantiere_id)
-        res_op = query_op.execute()
-        costo_operai = sum([float(r["importo_totale"]) for r in res_op.data if r.get("importo_totale")])
+        def query_op():
+            q = supabase.table("rapportini_operai").select("importo_totale, data_lavoro, operai!inner(company_id)").eq("operai.company_id", company_id)
+            if start_date: q = q.gte("data_lavoro", start_date)
+            if end_date: q = q.lte("data_lavoro", end_date)
+            if cantiere_id: q = q.eq("cantiere_id", cantiere_id)
+            return q
+        righe_op = leggi_tutte(query_op)
+        costo_operai = sum([float(r["importo_totale"]) for r in righe_op if r.get("importo_totale")])
 
         # Costi totali da rapportini mezzi
-        query_mz = supabase.table("rapportini_mezzi").select("importo_totale, data_utilizzo, mezzi!inner(company_id)").eq("mezzi.company_id", company_id)
-        if start_date: query_mz = query_mz.gte("data_utilizzo", start_date)
-        if end_date: query_mz = query_mz.lte("data_utilizzo", end_date)
-        if cantiere_id: query_mz = query_mz.eq("cantiere_id", cantiere_id)
-        res_mz = query_mz.execute()
-        costo_mezzi = sum([float(r["importo_totale"]) for r in res_mz.data if r.get("importo_totale")])
+        def query_mz():
+            q = supabase.table("rapportini_mezzi").select("importo_totale, data_utilizzo, mezzi!inner(company_id)").eq("mezzi.company_id", company_id)
+            if start_date: q = q.gte("data_utilizzo", start_date)
+            if end_date: q = q.lte("data_utilizzo", end_date)
+            if cantiere_id: q = q.eq("cantiere_id", cantiere_id)
+            return q
+        righe_mz = leggi_tutte(query_mz)
+        costo_mezzi = sum([float(r["importo_totale"]) for r in righe_mz if r.get("importo_totale")])
 
         # Costi totali da materiali consegnati (DDT)
-        query_mat = supabase.table("ddt_materiali").select("importo_totale, data_consegna, cantieri!inner(company_id)").eq("cantieri.company_id", company_id)
-        if start_date: query_mat = query_mat.gte("data_consegna", start_date)
-        if end_date: query_mat = query_mat.lte("data_consegna", end_date)
-        if cantiere_id: query_mat = query_mat.eq("cantiere_id", cantiere_id)
-        res_mat = query_mat.execute()
-        costo_materiali = sum([float(r["importo_totale"]) for r in res_mat.data if r.get("importo_totale")])
+        def query_mat():
+            q = supabase.table("ddt_materiali").select("importo_totale, data_consegna, cantieri!inner(company_id)").eq("cantieri.company_id", company_id)
+            if start_date: q = q.gte("data_consegna", start_date)
+            if end_date: q = q.lte("data_consegna", end_date)
+            if cantiere_id: q = q.eq("cantiere_id", cantiere_id)
+            return q
+        righe_mat = leggi_tutte(query_mat)
+        costo_materiali = sum([float(r["importo_totale"]) for r in righe_mat if r.get("importo_totale")])
 
         # Cantieri: i ricavi sono l'importo contrattuale scalato per la % di avanzamento lavori
         # (pesata sulle voci del computo metrico se presente, altrimenti il valore manuale del
@@ -54,13 +61,13 @@ def get_dashboard_kpi(
         cantieri_res = query_cantieri.execute()
 
         date_costi = set()
-        for r in res_op.data:
+        for r in righe_op:
             if r.get("data_lavoro"):
                 date_costi.add(r["data_lavoro"][:10])
-        for r in res_mz.data:
+        for r in righe_mz:
             if r.get("data_utilizzo"):
                 date_costi.add(r["data_utilizzo"][:10])
-        for r in res_mat.data:
+        for r in righe_mat:
             if r.get("data_consegna"):
                 date_costi.add(r["data_consegna"][:10])
 
@@ -92,25 +99,31 @@ def get_dashboard_charts(
 ):
     try:
         # Fetch rapportini operai
-        query_op = supabase.table("rapportini_operai").select("importo_totale, data_lavoro, operai!inner(company_id), cantieri(nome_cantiere)").eq("operai.company_id", company_id)
-        if start_date: query_op = query_op.gte("data_lavoro", start_date)
-        if end_date: query_op = query_op.lte("data_lavoro", end_date)
-        if cantiere_id: query_op = query_op.eq("cantiere_id", cantiere_id)
-        res_op = query_op.execute()
+        def query_op():
+            q = supabase.table("rapportini_operai").select("importo_totale, data_lavoro, operai!inner(company_id), cantieri(nome_cantiere)").eq("operai.company_id", company_id)
+            if start_date: q = q.gte("data_lavoro", start_date)
+            if end_date: q = q.lte("data_lavoro", end_date)
+            if cantiere_id: q = q.eq("cantiere_id", cantiere_id)
+            return q
+        righe_op = leggi_tutte(query_op)
 
         # Fetch rapportini mezzi
-        query_mz = supabase.table("rapportini_mezzi").select("importo_totale, data_utilizzo, mezzi!inner(company_id), cantieri(nome_cantiere)").eq("mezzi.company_id", company_id)
-        if start_date: query_mz = query_mz.gte("data_utilizzo", start_date)
-        if end_date: query_mz = query_mz.lte("data_utilizzo", end_date)
-        if cantiere_id: query_mz = query_mz.eq("cantiere_id", cantiere_id)
-        res_mz = query_mz.execute()
+        def query_mz():
+            q = supabase.table("rapportini_mezzi").select("importo_totale, data_utilizzo, mezzi!inner(company_id), cantieri(nome_cantiere)").eq("mezzi.company_id", company_id)
+            if start_date: q = q.gte("data_utilizzo", start_date)
+            if end_date: q = q.lte("data_utilizzo", end_date)
+            if cantiere_id: q = q.eq("cantiere_id", cantiere_id)
+            return q
+        righe_mz = leggi_tutte(query_mz)
 
         # Fetch materiali consegnati (DDT)
-        query_mat = supabase.table("ddt_materiali").select("importo_totale, data_consegna, cantieri!inner(company_id, nome_cantiere)").eq("cantieri.company_id", company_id)
-        if start_date: query_mat = query_mat.gte("data_consegna", start_date)
-        if end_date: query_mat = query_mat.lte("data_consegna", end_date)
-        if cantiere_id: query_mat = query_mat.eq("cantiere_id", cantiere_id)
-        res_mat = query_mat.execute()
+        def query_mat():
+            q = supabase.table("ddt_materiali").select("importo_totale, data_consegna, cantieri!inner(company_id, nome_cantiere)").eq("cantieri.company_id", company_id)
+            if start_date: q = q.gte("data_consegna", start_date)
+            if end_date: q = q.lte("data_consegna", end_date)
+            if cantiere_id: q = q.eq("cantiere_id", cantiere_id)
+            return q
+        righe_mat = leggi_tutte(query_mat)
 
         # Fetch Cantieri for ricavi: solo le commesse realmente attive (non i preventivi), scalati per % avanzamento.
         # Il cantiere non si filtra per data (una commessa non "nasce e muore" nel periodo), ma il
@@ -127,7 +140,7 @@ def get_dashboard_charts(
 
         date_costi = set()
 
-        for r in res_op.data:
+        for r in righe_op:
             if r.get("data_lavoro") and r.get("importo_totale"):
                 costo = float(r["importo_totale"])
                 day = r["data_lavoro"][:10]
@@ -136,7 +149,7 @@ def get_dashboard_charts(
                 dist_dict["Operai"] += costo
                 date_costi.add(day)
 
-        for r in res_mz.data:
+        for r in righe_mz:
             if r.get("data_utilizzo") and r.get("importo_totale"):
                 costo = float(r["importo_totale"])
                 day = r["data_utilizzo"][:10]
@@ -145,7 +158,7 @@ def get_dashboard_charts(
                 dist_dict["Mezzi"] += costo
                 date_costi.add(day)
 
-        for r in res_mat.data:
+        for r in righe_mat:
             if r.get("data_consegna") and r.get("importo_totale"):
                 costo = float(r["importo_totale"])
                 day = r["data_consegna"][:10]

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List
 from datetime import date
 
@@ -105,5 +105,54 @@ class FornitoreUpdate(BaseModel):
     email: Optional[str] = None
 
 class FornitoreResponse(FornitoreBase):
+    id: str
+    azienda_id: str
+
+# --- Subappaltatori ---
+# Anagrafica separata dai fornitori: qui ci sono le ditte che eseguono lavorazioni del computo in
+# subappalto (SAL Sub), non quelle che vendono materiali.
+def _testo_opzionale(valore):
+    if isinstance(valore, str):
+        valore = valore.strip()
+        return valore or None
+    return valore
+
+
+class SubappaltatoreBase(BaseModel):
+    ragione_sociale: str
+    partita_iva: Optional[str] = None
+    citta: Optional[str] = None
+    email: Optional[str] = None
+    telefono: Optional[str] = None
+
+    _pulisci_opzionali = field_validator("partita_iva", "citta", "email", "telefono", mode="before")(_testo_opzionale)
+
+    @field_validator("ragione_sociale")
+    @classmethod
+    def _ragione_sociale(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("La ragione sociale è obbligatoria")
+        return v.strip()
+
+class SubappaltatoreCreate(SubappaltatoreBase):
+    pass
+
+class SubappaltatoreUpdate(BaseModel):
+    ragione_sociale: Optional[str] = None
+    partita_iva: Optional[str] = None
+    citta: Optional[str] = None
+    email: Optional[str] = None
+    telefono: Optional[str] = None
+
+    _pulisci_opzionali = field_validator("partita_iva", "citta", "email", "telefono", mode="before")(_testo_opzionale)
+
+    @field_validator("ragione_sociale")
+    @classmethod
+    def _ragione_sociale(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            raise ValueError("La ragione sociale è obbligatoria")
+        return v.strip() if v else v
+
+class SubappaltatoreResponse(SubappaltatoreBase):
     id: str
     azienda_id: str
