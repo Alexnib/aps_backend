@@ -95,6 +95,14 @@ DDT_TOOL = {
                             "type": "string",
                             "description": "Ragione sociale del fornitore/mittente che emette il DDT",
                         },
+                        "fornitore_partita_iva": {
+                            "type": "string",
+                            "description": "Partita IVA del fornitore/mittente (solo le cifre, senza prefisso IT). Stringa vuota se non presente.",
+                        },
+                        "fornitore_citta": {
+                            "type": "string",
+                            "description": "Citta' della sede del fornitore/mittente. Stringa vuota se non presente.",
+                        },
                         "numero_documento": {
                             "type": "string",
                             "description": "Numero del documento di trasporto",
@@ -128,14 +136,24 @@ DDT_TOOL = {
                                         "type": "number",
                                         "description": "Quantita' consegnata",
                                     },
+                                    "prezzo_unitario": {
+                                        "type": ["number", "null"],
+                                        "description": (
+                                            "Prezzo unitario netto in euro della riga, se il DDT e' valorizzato (riporta i prezzi): "
+                                            "al netto di eventuali sconti di riga. Se il documento riporta solo l'importo della riga, "
+                                            "calcolalo come importo / quantita'. null se il DDT non riporta prezzi per questa riga."
+                                        ),
+                                    },
                                 },
-                                "required": ["codice", "descrizione", "unita_misura", "quantita"],
+                                "required": ["codice", "descrizione", "unita_misura", "quantita", "prezzo_unitario"],
                                 "additionalProperties": False,
                             },
                         },
                     },
                     "required": [
                         "fornitore",
+                        "fornitore_partita_iva",
+                        "fornitore_citta",
                         "numero_documento",
                         "data_ddt",
                         "destinatario_testo",
@@ -334,6 +352,8 @@ def estrai_ddt(pdf_bytes: bytes, filename: str) -> dict:
     prompt = (
         "Analizza questo documento PDF: puo' contenere uno o piu' Documenti Di Trasporto (DDT). "
         "Estrai ogni DDT presente come elemento separato nell'array 'documenti', con tutte le relative righe di materiale, "
-        "usando lo strumento fornito. Non unire DDT diversi anche se hanno lo stesso fornitore."
+        "usando lo strumento fornito. Non unire DDT diversi anche se hanno lo stesso fornitore. "
+        "Se il DDT e' valorizzato riporta per ogni riga il prezzo unitario netto; se non riporta prezzi "
+        "lascia prezzo_unitario a null, senza inventarlo."
     )
     return _esegui_estrazione(pdf_bytes, filename, DDT_TOOL, prompt)

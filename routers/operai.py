@@ -3,12 +3,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from typing import List
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from typing import List, Optional
 from models.entities import OperaioCreate, OperaioResponse, OperaioUpdate
 from utils.supabase_client import supabase
 from utils.auth_deps import get_current_company_id
 from utils.errors import raise_db_error
+from utils.elenchi import PER_PAGINA, PER_PAGINA_MAX, filtra_ricerca, leggi_pagina
 
 router = APIRouter(prefix="/operai", tags=["operai"])
 
@@ -82,6 +83,40 @@ def get_operai(company_id: str = Depends(get_current_company_id)):
         logger.error(f"Error in {__name__}: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=400, detail=str(e))
+
+def _operaio(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "risorsa_id": row["risorsa_id"],
+        "matricola": row["matricola"],
+        "nome": row["nome"],
+        "cognome": row["cognome"],
+        "costo_orario": row["risorse"]["importo_unitario_standard"] if row.get("risorse") else 0.0,
+    }
+
+
+@router.get("/elenco")
+def elenco_operai(
+    q: Optional[str] = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(PER_PAGINA, ge=1, le=PER_PAGINA_MAX),
+    company_id: str = Depends(get_current_company_id),
+):
+    """Pagina della tabella Operai, per cognome. Il GET "/" resta per i menu a tendina."""
+    try:
+        query = (
+            supabase.table("operai")
+            .select("*, risorse(importo_unitario_standard)", count="exact")
+            .eq("company_id", company_id)
+        )
+        query = filtra_ricerca(query, q, ["nome", "cognome", "matricola"])
+        pagina = leggi_pagina(query.order("cognome").order("nome"), offset, limit)
+        pagina["elementi"] = [_operaio(r) for r in pagina["elementi"]]
+        return pagina
+    except Exception as e:
+        logger.error(f"Errore elenco operai: {traceback.format_exc()}")
+        raise_db_error(e)
+
 
 @router.put("/{operaio_id}", response_model=OperaioResponse)
 def update_operaio(operaio_id: str, operaio: OperaioUpdate, company_id: str = Depends(get_current_company_id)):

@@ -1,13 +1,14 @@
 import traceback
 import logging
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from models.entities import SubappaltatoreCreate, SubappaltatoreResponse, SubappaltatoreUpdate
 from utils.supabase_client import supabase
 from utils.auth_deps import get_current_company_id
 from utils.errors import raise_db_error
+from utils.elenchi import PER_PAGINA, PER_PAGINA_MAX, filtra_ricerca, leggi_pagina
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,23 @@ def lista_subappaltatori(company_id: str = Depends(get_current_company_id)):
         return res.data
     except Exception as e:
         logger.error(f"Errore lettura subappaltatori: {traceback.format_exc()}")
+        raise_db_error(e)
+
+
+@router.get("/elenco")
+def elenco_subappaltatori(
+    q: Optional[str] = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(PER_PAGINA, ge=1, le=PER_PAGINA_MAX),
+    company_id: str = Depends(get_current_company_id),
+):
+    """Pagina della tabella Subappaltatori, in ordine alfabetico. Il GET "/" resta per i menu."""
+    try:
+        query = supabase.table("subappaltatori").select("*", count="exact").eq("azienda_id", company_id)
+        query = filtra_ricerca(query, q, ["ragione_sociale", "partita_iva", "citta", "telefono", "email"])
+        return leggi_pagina(query.order("ragione_sociale"), offset, limit)
+    except Exception as e:
+        logger.error(f"Errore elenco subappaltatori: {traceback.format_exc()}")
         raise_db_error(e)
 
 

@@ -3,12 +3,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from typing import List
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from typing import List, Optional
 from models.entities import MezzoCreate, MezzoResponse, MezzoUpdate
 from utils.supabase_client import supabase
 from utils.auth_deps import get_current_company_id
 from utils.errors import raise_db_error
+from utils.elenchi import PER_PAGINA, PER_PAGINA_MAX, filtra_ricerca, leggi_pagina
 
 router = APIRouter(prefix="/mezzi", tags=["mezzi"])
 
@@ -80,6 +81,38 @@ def get_mezzi(company_id: str = Depends(get_current_company_id)):
         logger.error(f"Error in {__name__}: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/elenco")
+def elenco_mezzi(
+    q: Optional[str] = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(PER_PAGINA, ge=1, le=PER_PAGINA_MAX),
+    company_id: str = Depends(get_current_company_id),
+):
+    """Pagina della tabella Mezzi, per targa. Il GET "/" resta per i menu a tendina."""
+    try:
+        query = (
+            supabase.table("mezzi")
+            .select("*, risorse(importo_unitario_standard)", count="exact")
+            .eq("company_id", company_id)
+        )
+        query = filtra_ricerca(query, q, ["targa_matricola", "descrizione"])
+        pagina = leggi_pagina(query.order("targa_matricola"), offset, limit)
+        pagina["elementi"] = [
+            {
+                "id": r["id"],
+                "risorsa_id": r["risorsa_id"],
+                "targa_matricola": r["targa_matricola"],
+                "descrizione": r["descrizione"],
+                "costo_orario": r["risorse"]["importo_unitario_standard"] if r.get("risorse") else 0.0,
+            }
+            for r in pagina["elementi"]
+        ]
+        return pagina
+    except Exception as e:
+        logger.error(f"Errore elenco mezzi: {traceback.format_exc()}")
+        raise_db_error(e)
+
 
 @router.put("/{mezzo_id}", response_model=MezzoResponse)
 def update_mezzo(mezzo_id: str, mezzo: MezzoUpdate, company_id: str = Depends(get_current_company_id)):

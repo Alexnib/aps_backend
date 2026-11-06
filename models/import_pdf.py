@@ -69,3 +69,16 @@ class DocumentoDdtConferma(BaseModel):
 
 class ConfermaDdtRequest(BaseModel):
     documenti: List[DocumentoDdtConferma]
+
+
+class RigaPrezzoDdt(BaseModel):
+    codice: Optional[str] = None
+    descrizione: str
+
+
+class PrezziDdtRequest(BaseModel):
+    """Righe di un DDT in revisione di cui cercare il prezzo in anagrafica per il fornitore (e il
+    cantiere) scelti dall'utente."""
+    fornitore_id: str
+    cantiere_id: Optional[str] = None
+    righe: List[RigaPrezzoDdt]

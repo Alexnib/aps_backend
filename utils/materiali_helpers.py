@@ -31,20 +31,19 @@ def find_or_create_risorsa_materiale(nome: str, unita_misura: str, company_id: s
     nome_norm = nome.strip()
     tipologia_id = get_tipologia_materiale_id()
 
-    esistenti = (
-        supabase.table("risorse")
+    esistenti = leggi_tutte(
+        lambda: supabase.table("risorse")
         .select("id, nome_risorsa")
         .eq("company_id", company_id)
         .eq("tipologia_risorsa_id", tipologia_id)
-        .execute()
     )
-    for r in esistenti.data or []:
+    for r in esistenti:
         if r["nome_risorsa"].strip().lower() == nome_norm.lower():
             return r["id"]
 
     codice_risorsa = "MAT-" + "".join(ch for ch in nome_norm.upper() if ch.isalnum())[:12]
     if not codice_risorsa or codice_risorsa == "MAT-":
-        codice_risorsa = f"MAT-{len(esistenti.data or []) + 1}"
+        codice_risorsa = f"MAT-{len(esistenti) + 1}"
 
     nuova = (
         supabase.table("risorse")
@@ -138,14 +137,64 @@ def trova_risorsa_per_nome(nome: str, company_id: str) -> Optional[str]:
     if not nome_norm:
         return None
     tipologia_id = get_tipologia_materiale_id()
-    esistenti = (
-        supabase.table("risorse")
+    esistenti = leggi_tutte(
+        lambda: supabase.table("risorse")
         .select("id, nome_risorsa")
         .eq("company_id", company_id)
         .eq("tipologia_risorsa_id", tipologia_id)
-        .execute()
     )
-    for r in esistenti.data or []:
+    for r in esistenti:
         if r["nome_risorsa"].strip().lower() == nome_norm:
             return r["id"]
     return None
+
+
+def _normalizza(testo: Optional[str]) -> str:
+    return " ".join((testo or "").lower().split())
+
+
+def cerca_prezzi_anagrafica(fornitore_id: str, cantiere_id: Optional[str], righe: List[dict]) -> List[Optional[dict]]:
+    """Per ogni riga ({codice, descrizione}) cerca il prezzo gia' registrato in anagrafica per questo
+    fornitore, senza creare nulla. Ritorna, nello stesso ordine, {id, importo_unitario, cantiere_id}
+    oppure None.
+
+    La corrispondenza si cerca prima per codice articolo del fornitore (il dato piu' affidabile: e'
+    lo stesso codice che il fornitore stampa su preventivi e DDT), poi per descrizione, confrontata
+    sia con la descrizione dell'articolo del fornitore sia con il nome del materiale. Tra piu'
+    corrispondenze vince il prezzo dedicato al cantiere indicato, poi quello valido per tutte le
+    commesse; un prezzo dedicato a un ALTRO cantiere non vale qui. Tutti gli articoli del fornitore
+    si leggono una sola volta, non una query per riga."""
+    articoli = leggi_tutte(
+        lambda: supabase.table("articoli_fornitori")
+        .select("id, importo_unitario, cantiere_id, codice_articolo_fornitore, descrizione_articolo, risorse(nome_risorsa)")
+        .eq("fornitore_id", fornitore_id)
+    )
+    validi = [a for a in articoli if a.get("cantiere_id") in (None, cantiere_id)]
+
+    def migliore(candidati: list) -> Optional[dict]:
+        if not candidati:
+            return None
+        candidati.sort(key=lambda a: 0 if cantiere_id and a.get("cantiere_id") == cantiere_id else 1)
+        a = candidati[0]
+        return {"id": a["id"], "importo_unitario": a.get("importo_unitario"), "cantiere_id": a.get("cantiere_id")}
+
+    risultati: List[Optional[dict]] = []
+    for riga in righe:
+        codice = _normalizza(riga.get("codice")).replace(" ", "")
+        descrizione = _normalizza(riga.get("descrizione"))
+        trovato = None
+        if codice:
+            trovato = migliore(
+                [a for a in validi if _normalizza(a.get("codice_articolo_fornitore")).replace(" ", "") == codice]
+            )
+        if not trovato and descrizione:
+            trovato = migliore(
+                [
+                    a
+                    for a in validi
+                    if _normalizza(a.get("descrizione_articolo")) == descrizione
+                    or _normalizza((a.get("risorse") or {}).get("nome_risorsa")) == descrizione
+                ]
+            )
+        risultati.append(trovato)
+    return risultati

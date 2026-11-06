@@ -3,12 +3,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from typing import List
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from typing import List, Optional
 from models.entities import FornitoreCreate, FornitoreResponse, FornitoreUpdate
 from utils.supabase_client import supabase
 from utils.auth_deps import get_current_company_id
 from utils.errors import raise_db_error
+from utils.elenchi import PER_PAGINA, PER_PAGINA_MAX, filtra_ricerca, leggi_pagina
 
 router = APIRouter(prefix="/fornitori", tags=["fornitori"])
 
@@ -38,6 +39,22 @@ def get_fornitori(company_id: str = Depends(get_current_company_id)):
         logger.error(f"Error in {__name__}: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/elenco")
+def elenco_fornitori(
+    q: Optional[str] = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(PER_PAGINA, ge=1, le=PER_PAGINA_MAX),
+    company_id: str = Depends(get_current_company_id),
+):
+    """Pagina della tabella Fornitori, in ordine alfabetico. Il GET "/" resta per i menu a tendina."""
+    try:
+        query = supabase.table("fornitori").select("*", count="exact").eq("azienda_id", company_id)
+        query = filtra_ricerca(query, q, ["ragione_sociale", "partita_iva", "citta", "email"])
+        return leggi_pagina(query.order("ragione_sociale"), offset, limit)
+    except Exception as e:
+        logger.error(f"Errore elenco fornitori: {traceback.format_exc()}")
+        raise_db_error(e)
 
 @router.put("/{fornitore_id}", response_model=FornitoreResponse)
 def update_fornitore(fornitore_id: str, forn: FornitoreUpdate, company_id: str = Depends(get_current_company_id)):

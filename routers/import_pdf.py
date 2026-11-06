@@ -9,6 +9,7 @@ from models.import_pdf import (
     ConfermaComputoRequest,
     ConfermaDdtRequest,
     ConfermaPreventivoRequest,
+    PrezziDdtRequest,
     VoceComputoUpdate,
 )
 from utils.supabase_client import supabase
@@ -17,10 +18,9 @@ from utils.auth_deps import get_current_company_id
 from utils.errors import raise_db_error
 from utils.pdf_extraction import estrai_computo_metrico, estrai_ddt, estrai_preventivo_fornitore
 from utils.materiali_helpers import (
+    cerca_prezzi_anagrafica,
     find_or_create_risorsa_materiale,
     find_or_create_articolo_fornitore,
-    trova_prezzo_articolo,
-    trova_risorsa_per_nome,
 )
 
 router = APIRouter(prefix="/import", tags=["import"])
@@ -368,7 +368,7 @@ async def estrai_ddt_endpoint(
 
     try:
         fornitori_res = (
-            supabase.table("fornitori").select("id, ragione_sociale").eq("azienda_id", company_id).execute()
+            supabase.table("fornitori").select("id, ragione_sociale, partita_iva").eq("azienda_id", company_id).execute()
         )
         fornitori_disponibili = fornitori_res.data or []
     except Exception as e:
@@ -389,14 +389,23 @@ async def estrai_ddt_endpoint(
 
     for doc in documenti:
         nome_fornitore = (doc.get("fornitore") or "").strip().lower()
-        fornitore_suggerito = next(
-            (
-                f
-                for f in fornitori_disponibili
-                if f["ragione_sociale"].strip().lower() == nome_fornitore
-            ),
-            None,
-        )
+        # Prima la partita IVA (univoca e stampata su ogni DDT), poi il nome esatto, poi un nome
+        # che contiene l'altro.
+        piva = _solo_cifre(doc.get("fornitore_partita_iva"))
+        fornitore_suggerito = None
+        if len(piva) >= 8:
+            fornitore_suggerito = next(
+                (f for f in fornitori_disponibili if _solo_cifre(f.get("partita_iva")) == piva), None
+            )
+        if not fornitore_suggerito:
+            fornitore_suggerito = next(
+                (
+                    f
+                    for f in fornitori_disponibili
+                    if f["ragione_sociale"].strip().lower() == nome_fornitore
+                ),
+                None,
+            )
         if not fornitore_suggerito and nome_fornitore:
             fornitore_suggerito = next(
                 (
@@ -422,21 +431,21 @@ async def estrai_ddt_endpoint(
                     break
         doc["cantiere_id_suggerito"] = cantiere_suggerito["id"] if cantiere_suggerito else None
 
-        # Suggerimento prezzo per ogni riga, solo lettura (non crea nulla): se il materiale e' gia'
-        # in anagrafica per questo fornitore, preferisce un eventuale prezzo dedicato al cantiere
-        # suggerito, altrimenti quello valido per tutte le commesse. Se non c'e' ancora nessun
-        # prezzo noto, il campo resta vuoto e l'utente lo inserisce a mano nella revisione.
-        for riga in doc.get("righe", []):
-            prezzo_suggerito = None
-            if doc["fornitore_id_suggerito"]:
-                risorsa_id = trova_risorsa_per_nome(riga.get("descrizione", ""), company_id)
-                if risorsa_id:
-                    prezzo = trova_prezzo_articolo(
-                        doc["fornitore_id_suggerito"], risorsa_id, doc["cantiere_id_suggerito"]
-                    )
-                    if prezzo:
-                        prezzo_suggerito = prezzo["importo_unitario"]
-            riga["prezzo_unitario_suggerito"] = prezzo_suggerito
+        # Due prezzi per ogni riga, solo lettura (non crea nulla): quello stampato sul DDT, se e'
+        # valorizzato, e quello gia' noto in anagrafica per il fornitore riconosciuto (dedicato al
+        # cantiere suggerito se esiste, altrimenti valido per tutte le commesse). In revisione il
+        # primo ha la precedenza; se l'utente sceglie o crea un altro fornitore, il frontend
+        # ricalcola quello da anagrafica con /ddt/prezzi.
+        righe = doc.get("righe", [])
+        da_anagrafica = (
+            cerca_prezzi_anagrafica(doc["fornitore_id_suggerito"], doc["cantiere_id_suggerito"], righe)
+            if doc["fornitore_id_suggerito"]
+            else [None] * len(righe)
+        )
+        for riga, trovato in zip(righe, da_anagrafica):
+            prezzo_ddt = riga.pop("prezzo_unitario", None)
+            riga["prezzo_ddt"] = prezzo_ddt if isinstance(prezzo_ddt, (int, float)) and prezzo_ddt > 0 else None
+            riga["prezzo_anagrafica"] = _prezzo_valido(trovato)
 
     return {
         "documenti": documenti,
@@ -444,6 +453,34 @@ async def estrai_ddt_endpoint(
         "fornitori_disponibili": fornitori_disponibili,
         "cantieri_disponibili": cantieri_disponibili,
     }
+
+
+def _solo_cifre(testo) -> str:
+    return "".join(ch for ch in (testo or "") if ch.isdigit())
+
+
+def _prezzo_valido(articolo: dict | None) -> float | None:
+    """Prezzo di un articolo in anagrafica, se davvero noto: 0 vuol dire che il materiale e' stato
+    registrato senza prezzo (es. da un DDT non valorizzato), non che costa zero."""
+    if not articolo:
+        return None
+    prezzo = articolo.get("importo_unitario") or 0
+    return prezzo if prezzo > 0 else None
+
+
+@router.post("/ddt/prezzi")
+def prezzi_ddt(payload: PrezziDdtRequest, company_id: str = Depends(get_current_company_id)):
+    _get_fornitore_o_404(payload.fornitore_id, company_id)
+    if payload.cantiere_id:
+        _get_cantiere_o_404(payload.cantiere_id, company_id)
+    try:
+        trovati = cerca_prezzi_anagrafica(
+            payload.fornitore_id, payload.cantiere_id, [r.model_dump() for r in payload.righe]
+        )
+    except Exception as e:
+        logger.error(f"Errore ricerca prezzi DDT: {traceback.format_exc()}")
+        raise_db_error(e)
+    return {"prezzi": [_prezzo_valido(t) for t in trovati]}
 
 
 @router.post("/ddt/conferma")
@@ -466,19 +503,18 @@ def conferma_ddt(payload: ConfermaDdtRequest, company_id: str = Depends(get_curr
             if not doc.righe:
                 continue
 
-            righe_da_inserire = []
-            for riga in doc.righe:
-                risorsa_id = find_or_create_risorsa_materiale(
-                    riga.descrizione, riga.unita_misura, company_id
-                )
+            # Articolo gia' in anagrafica per questo fornitore: stessa ricerca della revisione
+            # (codice articolo, poi descrizione; prezzo dedicato al cantiere, poi generale).
+            esistenti = cerca_prezzi_anagrafica(
+                doc.fornitore_id, doc.cantiere_id, [r.model_dump() for r in doc.righe]
+            )
 
-                # Prezzo: se in anagrafica esiste gia' un prezzo per questo fornitore+materiale
-                # (dedicato al cantiere della consegna, o altrimenti valido per tutte le commesse),
-                # lo si usa in automatico; se l'utente lo ha corretto/inserito a mano in revisione
-                # (riga.prezzo_unitario), quello vince sempre e aggiorna anche l'anagrafica per le
-                # prossime volte. Un materiale mai visto prima crea un prezzo "per tutte le
-                # commesse" di default (non specifico a questo cantiere).
-                prezzo_esistente = trova_prezzo_articolo(doc.fornitore_id, risorsa_id, doc.cantiere_id)
+            righe_da_inserire = []
+            for riga, prezzo_esistente in zip(doc.righe, esistenti):
+                # Prezzo: se in anagrafica esiste gia' un prezzo per questo fornitore+materiale lo si
+                # usa in automatico; quello arrivato dalla revisione (letto dal DDT o scritto a mano)
+                # vince sempre e aggiorna anche l'anagrafica per le prossime volte. Un materiale mai
+                # visto prima crea un prezzo "per tutte le commesse" (non specifico a questo cantiere).
                 if prezzo_esistente:
                     articolo_id = prezzo_esistente["id"]
                     prezzo_unitario = (
@@ -491,13 +527,19 @@ def conferma_ddt(payload: ConfermaDdtRequest, company_id: str = Depends(get_curr
                             {"importo_unitario": riga.prezzo_unitario}
                         ).eq("id", articolo_id).execute()
                 else:
+                    risorsa_id = find_or_create_risorsa_materiale(
+                        riga.descrizione, riga.unita_misura, company_id
+                    )
                     articolo_id = find_or_create_articolo_fornitore(
                         doc.fornitore_id, risorsa_id, riga.descrizione, riga.unita_misura, riga.codice
                     )
                     prezzo_unitario = riga.prezzo_unitario if riga.prezzo_unitario is not None else 0
-                    supabase.table("articoli_fornitori").update(
-                        {"importo_unitario": prezzo_unitario}
-                    ).eq("id", articolo_id).execute()
+                    # Senza prezzo dalla revisione non si tocca l'anagrafica: un articolo appena
+                    # creato resta a 0, uno gia' esistente mantiene il suo prezzo.
+                    if riga.prezzo_unitario is not None:
+                        supabase.table("articoli_fornitori").update(
+                            {"importo_unitario": prezzo_unitario}
+                        ).eq("id", articolo_id).execute()
 
                 righe_da_inserire.append(
                     {

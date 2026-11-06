@@ -3,17 +3,23 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import date
+from typing import Literal, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from postgrest.exceptions import APIError
 
 from models.materiali import ArticoloAnagraficaCreate, ArticoloAnagraficaUpdate, ConsegnaCreate, ConsegnaUpdate
 from utils.supabase_client import supabase
 from utils.letture import leggi_tutte
 from utils.auth_deps import get_current_company_id
 from utils.errors import raise_db_error
+from utils.elenchi import PER_PAGINA, PER_PAGINA_MAX, filtra_ricerca, leggi_pagina, parole_ricerca
 from utils.materiali_helpers import (
     find_or_create_risorsa_materiale,
     find_or_create_articolo_fornitore,
     get_risorse_materiale_ids,
+    get_tipologia_materiale_id,
 )
 
 router = APIRouter(prefix="/materiali", tags=["materiali"])
@@ -90,6 +96,45 @@ def get_anagrafica(company_id: str = Depends(get_current_company_id)):
         logger.error(f"Errore lettura anagrafica materiali: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/anagrafica/elenco")
+def elenco_anagrafica(
+    q: Optional[str] = Query(None),
+    fornitore_id: Optional[str] = Query(None),
+    validita: Optional[str] = Query(None, description='"tutte" = prezzo valido per tutte le commesse, altrimenti id del cantiere'),
+    prezzo: Optional[Literal["senza", "con"]] = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(PER_PAGINA, ge=1, le=PER_PAGINA_MAX),
+    company_id: str = Depends(get_current_company_id),
+):
+    """Pagina dell'Anagrafica Articoli, dai piu' recenti. Il GET /anagrafica resta per i menu."""
+    try:
+        # L'azienda si riconosce dalla risorsa collegata (join interna, filtrata nel database).
+        query = (
+            supabase.table("articoli_fornitori")
+            .select(
+                "*, fornitori(id, ragione_sociale), risorse!inner(nome_risorsa), cantieri(id, nome_cantiere)",
+                count="exact",
+            )
+            .eq("risorse.company_id", company_id)
+            .eq("risorse.tipologia_risorsa_id", get_tipologia_materiale_id())
+        )
+        if fornitore_id:
+            query = query.eq("fornitore_id", fornitore_id)
+        if validita == "tutte":
+            query = query.is_("cantiere_id", "null")
+        elif validita:
+            query = query.eq("cantiere_id", validita)
+        if prezzo == "senza":
+            query = query.or_("importo_unitario.is.null,importo_unitario.eq.0")
+        elif prezzo == "con":
+            query = query.gt("importo_unitario", 0)
+        query = filtra_ricerca(query, q, ["descrizione_articolo", "codice_articolo_fornitore"])
+        return leggi_pagina(query.order("created_at", desc=True), offset, limit)
+    except Exception as e:
+        logger.error(f"Errore elenco anagrafica materiali: {traceback.format_exc()}")
+        raise_db_error(e)
 
 
 @router.post("/anagrafica")
@@ -225,6 +270,115 @@ def get_consegne_cantiere(cantiere_id: str, company_id: str = Depends(get_curren
         logger.error(f"Errore lettura consegne cantiere: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/consegne/elenco")
+def elenco_consegne(
+    cantiere_id: str,
+    q: Optional[str] = Query(None),
+    fornitore_id: Optional[str] = Query(None),
+    da: Optional[date] = Query(None),
+    a: Optional[date] = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(PER_PAGINA, ge=1, le=PER_PAGINA_MAX),
+    company_id: str = Depends(get_current_company_id),
+):
+    """Pagina dei materiali consegnati in un cantiere (pagina DDT), dai piu' recenti.
+
+    Filtri, conteggio e importo totale li calcola la funzione SQL ddt_consegne_elenco
+    (migrations/20261105_ddt_consegne_elenco.sql): la ricerca guarda sia il materiale sia il
+    numero del documento, e il totale in euro riguarda tutte le consegne filtrate, non solo la
+    pagina. Qui si leggono poi le sole righe della pagina.
+    """
+    _get_cantiere_o_404(cantiere_id, company_id)
+    try:
+        try:
+            riepilogo = _riepilogo_consegne_sql(company_id, cantiere_id, q, fornitore_id, da, a, offset, limit)
+        except APIError as e:
+            if e.code != "PGRST202":  # PGRST202 = funzione SQL non (ancora) creata nel database
+                raise
+            logger.warning(
+                "Funzione ddt_consegne_elenco assente: eseguire migrations/20261105_ddt_consegne_elenco.sql. "
+                "Nel frattempo l'elenco DDT legge tutte le consegne del cantiere."
+            )
+            return _elenco_consegne_senza_funzione(cantiere_id, q, fornitore_id, da, a, offset, limit)
+
+        ids = riepilogo["ids"]
+        righe = (
+            supabase.table("ddt_materiali").select(CONSEGNA_SELECT).in_("id", ids).execute().data
+            if ids else []
+        )
+        per_id = {r["id"]: r for r in righe}
+        return {
+            "elementi": [per_id[i] for i in ids if i in per_id],
+            "totale": riepilogo["totale"],
+            "importo_totale": round(float(riepilogo["importo_totale"] or 0), 2),
+            "offset": offset,
+            "limit": limit,
+        }
+    except Exception as e:
+        logger.error(f"Errore elenco consegne: {traceback.format_exc()}")
+        raise_db_error(e)
+
+
+def _riepilogo_consegne_sql(company_id, cantiere_id, q, fornitore_id, da, a, offset, limit) -> dict:
+    """Totale, importo e id della pagina, calcolati dalla funzione SQL (vedi la migrazione)."""
+    return supabase.rpc("ddt_consegne_elenco", {
+        "p_company_id": company_id,
+        "p_cantiere_id": cantiere_id,
+        "p_q": " ".join(parole_ricerca(q)) or None,
+        "p_fornitore_id": fornitore_id,
+        "p_da": da.isoformat() if da else None,
+        "p_a": a.isoformat() if a else None,
+        "p_limit": limit,
+        "p_offset": offset,
+    }).execute().data
+
+
+def _elenco_consegne_senza_funzione(cantiere_id, q, fornitore_id, da, a, offset, limit) -> dict:
+    """Stesso risultato della funzione SQL, ma leggendo tutte le consegne del cantiere e filtrando
+    qui: usato solo finche' la migrazione non e' stata eseguita (lento con migliaia di consegne)."""
+    righe = leggi_tutte(
+        lambda: supabase.table("ddt_materiali")
+        .select(
+            "*, articoli_fornitori(descrizione_articolo, unita_misura, codice_articolo_fornitore, "
+            "fornitore_id, fornitori(ragione_sociale))"
+        )
+        .eq("cantiere_id", cantiere_id)
+    )
+    parole = [p.lower() for p in parole_ricerca(q)]
+
+    def corrisponde(r: dict) -> bool:
+        af = r.get("articoli_fornitori") or {}
+        if fornitore_id and af.get("fornitore_id") != fornitore_id:
+            return False
+        giorno = (r.get("data_consegna") or "")[:10]
+        if da and giorno < da.isoformat():
+            return False
+        if a and giorno > a.isoformat():
+            return False
+        testo = " ".join(
+            str(x or "")
+            for x in (
+                af.get("descrizione_articolo"),
+                af.get("codice_articolo_fornitore"),
+                (af.get("fornitori") or {}).get("ragione_sociale"),
+                r.get("numero_documento"),
+            )
+        ).lower()
+        return all(p in testo for p in parole)
+
+    filtrate = [r for r in righe if corrisponde(r)]
+    # Dalla piu' recente; a parita' di data e ora di inserimento, per id (come la funzione SQL).
+    filtrate.sort(key=lambda r: r["id"])
+    filtrate.sort(key=lambda r: (r.get("data_consegna") or "", r.get("created_at") or ""), reverse=True)
+    return {
+        "elementi": filtrate[offset:offset + limit],
+        "totale": len(filtrate),
+        "importo_totale": round(sum(float(r.get("importo_totale") or 0) for r in filtrate), 2),
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 @router.post("/consegne")
