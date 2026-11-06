@@ -8,7 +8,16 @@ from models.auth import (
     UserUpdateRequest,
 )
 from utils.supabase_client import supabase
-from utils.auth_deps import get_current_user
+from utils.auth_deps import (
+    MESSAGGI_STATO,
+    Contesto,
+    UtenteAutenticato,
+    carica_profilo,
+    errore_stato_account,
+    get_contesto,
+    get_current_user,
+    migrazione_mancante,
+)
 from supabase_auth.errors import AuthApiError
 import traceback
 import logging
@@ -18,9 +27,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def _company_id_per_utente(user_id: str) -> str:
-    user_res = supabase.table("users").select("company_id").eq("id", user_id).execute()
-    return user_res.data[0]["company_id"] if user_res.data else ""
 
 # Codici d'errore di Supabase Auth tradotti in risposte comprensibili. Per il login il messaggio
 # sulle credenziali resta volutamente generico: non deve far capire se l'email esiste o meno.
@@ -110,13 +116,23 @@ def register(request: UserRegisterRequest):
         }).execute()
         company_id = company_res.data[0]["id"]
 
-        supabase.table("users").insert({
+        profilo = {
             "id": user_id,
             "company_id": company_id,
             "nome": request.nome,
             "cognome": request.cognome,
-            "ruolo": "admin",  # chi registra l'azienda ne e' l'amministratore
-        }).execute()
+            "ruolo": "admin",  # (colonna storica: chi registra l'azienda ne e' il titolare)
+        }
+        try:
+            # Il nuovo account non puo' entrare finche' un admin non lo abilita dal pannello Admin.
+            supabase.table("users").insert({**profilo, "email": request.email, "stato": "in_attesa"}).execute()
+            in_attesa = True
+        except Exception as e:
+            # Migrazione dei ruoli non ancora eseguita: si registra come prima (account subito attivo).
+            if not migrazione_mancante(e):
+                raise
+            supabase.table("users").insert(profilo).execute()
+            in_attesa = False
     except Exception as e:
         logger.error(f"Error in register (profilo azienda): {traceback.format_exc()}")
         # Annulla quanto gia' creato: altrimenti resterebbe un utente Auth senza azienda, che non
@@ -143,6 +159,8 @@ def register(request: UserRegisterRequest):
         # Se Supabase richiede la conferma dell'email non c'e' ancora una sessione: il frontend lo
         # usa per dire all'utente di controllare la posta invece di tentare l'accesso.
         "conferma_email_richiesta": auth_response.session is None,
+        # L'account deve essere abilitato da un admin prima di poter accedere.
+        "in_attesa": in_attesa,
     }
 
 
@@ -164,16 +182,20 @@ def login(request: UserLoginRequest):
         raise HTTPException(status_code=status_code, detail=messaggio)
 
     user_id = auth_response.user.id
-    company_id = _company_id_per_utente(user_id)
-    if not company_id:
+    profilo = carica_profilo(user_id, fresco=True)
+    if not profilo or not profilo.company_id:
         raise HTTPException(status_code=403, detail="Il tuo account non risulta collegato a nessuna azienda. Contatta l'amministratore.")
+    # Password giusta ma account non ancora abilitato (o bloccato): niente token, e un messaggio
+    # che spiega perche'.
+    if profilo.stato != "attivo":
+        raise HTTPException(status_code=403, detail=MESSAGGI_STATO.get(profilo.stato, "Account non attivo."))
 
     return TokenResponse(
         access_token=auth_response.session.access_token,
         refresh_token=auth_response.session.refresh_token,
         token_type="bearer",
         user_id=user_id,
-        company_id=company_id
+        company_id=profilo.company_id,
     )
 
 
@@ -191,14 +213,19 @@ def refresh_token(request: RefreshTokenRequest):
             raise HTTPException(status_code=401, detail="Sessione scaduta, effettua di nuovo il login.")
 
         user_id = auth_response.user.id
-        company_id = _company_id_per_utente(user_id)
+        profilo = carica_profilo(user_id, fresco=True)
+        if not profilo:
+            raise HTTPException(status_code=401, detail="Sessione scaduta, effettua di nuovo il login.")
+        # Account bloccato nel frattempo: la sessione non si rinnova piu'.
+        if profilo.stato != "attivo":
+            raise errore_stato_account(profilo.stato)
 
         return TokenResponse(
             access_token=auth_response.session.access_token,
             refresh_token=auth_response.session.refresh_token,
             token_type="bearer",
             user_id=user_id,
-            company_id=company_id,
+            company_id=profilo.company_id,
         )
     except HTTPException:
         raise
@@ -209,27 +236,55 @@ def refresh_token(request: RefreshTokenRequest):
         raise HTTPException(status_code=401, detail="Sessione scaduta, effettua di nuovo il login.")
 
 
-@router.get("/me", response_model=UserMeResponse)
-def get_me(user=Depends(get_current_user)):
+def _profilo_completo(user_id: str) -> dict:
+    """Riga di users con ruolo, stato e azienda (senza le colonne nuove se la migrazione dei ruoli
+    non e' ancora stata eseguita)."""
     try:
-        user_res = (
+        righe = (
             supabase.table("users")
-            .select("id, company_id, nome, cognome, ruolo, companies(partita_iva, indirizzo)")
-            .eq("id", user.id)
+            .select("id, company_id, nome, cognome, email, stato, role(codice), companies(partita_iva, indirizzo)")
+            .eq("id", user_id)
             .execute()
+            .data
         )
-        if not user_res.data:
-            raise HTTPException(status_code=404, detail="Profilo utente non trovato")
-        profilo = user_res.data[0]
+    except Exception as e:
+        if not migrazione_mancante(e):
+            raise
+        righe = (
+            supabase.table("users")
+            .select("id, company_id, nome, cognome, companies(partita_iva, indirizzo)")
+            .eq("id", user_id)
+            .execute()
+            .data
+        )
+    if not righe:
+        raise HTTPException(status_code=404, detail="Profilo utente non trovato")
+    return righe[0]
+
+
+@router.get("/me", response_model=UserMeResponse)
+def get_me(user: UtenteAutenticato = Depends(get_current_user), contesto: Contesto = Depends(get_contesto)):
+    """Profilo dell'account in uso: quello di chi ha fatto l'accesso o, se un admin sta usando
+    "Visualizza", quello dell'utente visualizzato (con `visualizzato_da` = l'admin)."""
+    try:
+        profilo = _profilo_completo(contesto.utente.id)
+        visualizzato_da = None
+        if contesto.admin:
+            admin = _profilo_completo(contesto.admin.id)
+            visualizzato_da = {"id": admin["id"], "nome": admin["nome"], "cognome": admin["cognome"]}
 
         return UserMeResponse(
             id=profilo["id"],
-            email=user.email,
+            # Per l'utente stesso l'email e' quella del token; per un account visualizzato, la
+            # copia salvata in users.
+            email=profilo.get("email") if contesto.admin else (user.email or profilo.get("email")),
             nome=profilo["nome"],
             cognome=profilo["cognome"],
-            ruolo=profilo["ruolo"],
+            ruolo=contesto.utente.ruolo,
+            stato=contesto.utente.stato,
             company_id=profilo["company_id"],
             azienda=profilo.get("companies"),
+            visualizzato_da=visualizzato_da,
         )
     except Exception as e:
         logger.error(f"Error in get_me: {str(e)}")
@@ -240,17 +295,21 @@ def get_me(user=Depends(get_current_user)):
 
 
 @router.put("/me", response_model=UserMeResponse)
-def update_me(payload: UserUpdateRequest, user=Depends(get_current_user)):
+def update_me(
+    payload: UserUpdateRequest,
+    user: UtenteAutenticato = Depends(get_current_user),
+    contesto: Contesto = Depends(get_contesto),
+):
     data = payload.model_dump(exclude_unset=True)
     if not data:
         raise HTTPException(status_code=400, detail="Nessun campo da aggiornare")
 
     try:
-        res = supabase.table("users").update(data).eq("id", user.id).execute()
+        res = supabase.table("users").update(data).eq("id", contesto.utente.id).execute()
         if not res.data:
             raise HTTPException(status_code=404, detail="Profilo utente non trovato")
 
-        return get_me(user=user)
+        return get_me(user=user, contesto=contesto)
     except Exception as e:
         logger.error(f"Error in update_me: {str(e)}")
         logger.error(traceback.format_exc())

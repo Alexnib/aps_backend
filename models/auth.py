@@ -95,14 +95,23 @@ class AziendaInfo(BaseModel):
     indirizzo: Optional[str] = None
 
 
+class AdminVisualizzatoreInfo(BaseModel):
+    """L'admin che sta visualizzando questo account (pulsante "Visualizza" del pannello Admin)."""
+    id: str
+    nome: str
+    cognome: str
+
+
 class UserMeResponse(BaseModel):
     id: str
     email: Optional[str] = None
     nome: str
     cognome: str
-    ruolo: str
+    ruolo: str  # "admin" | "user"
+    stato: str = "attivo"  # "in_attesa" | "attivo" | "bloccato"
     company_id: str
     azienda: Optional[AziendaInfo] = None
+    visualizzato_da: Optional[AdminVisualizzatoreInfo] = None
 
 
 class UserUpdateRequest(BaseModel):

@@ -2,10 +2,11 @@ from dataclasses import dataclass
 from typing import Optional
 import threading
 import time
+import uuid
 
 import jwt
 from jwt import PyJWKClient
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from supabase_auth.errors import AuthApiError
 from utils.supabase_client import supabase, SUPABASE_URL
@@ -24,18 +25,102 @@ _EMITTENTE = f"{SUPABASE_URL}/auth/v1"
 _ALGORITMI_ASIMMETRICI = {"ES256", "RS256"}
 _chiavi_pubbliche = PyJWKClient(f"{_EMITTENTE}/.well-known/jwks.json", cache_keys=True, lifespan=3600, timeout=10)
 
-# Per quanto tempo si ricorda l'azienda di un utente (altrimenti un'altra lettura dal database a
-# ogni richiesta, ~110 ms). Un utente non cambia azienda; il limite serve solo perche' un account
-# eliminato smetta di funzionare in tempi brevi.
-_DURATA_CACHE_AZIENDA = 300
-_cache_azienda: dict[str, tuple[str, float]] = {}
+# Per quanto tempo si ricorda il profilo di un utente (azienda, ruolo, stato) invece di rileggerlo
+# dal database a ogni richiesta (~110 ms). Quando un admin abilita, blocca o cambia ruolo a un
+# utente il profilo si dimentica subito (dimentica_profilo); il limite copre gli altri casi.
+_DURATA_CACHE_PROFILO = 30
+_cache_profili: dict[str, tuple["Profilo", float]] = {}
 _cache_lock = threading.Lock()
+
+# Errori di PostgREST quando la migrazione 20261106_ruoli_e_approvazione.sql non e' ancora stata
+# eseguita (colonna, relazione o funzione mancante): in quel caso tutto funziona come prima,
+# cioe' ogni utente e' attivo e nessuno e' admin.
+ERRORI_MIGRAZIONE_MANCANTE = {"42703", "PGRST200", "PGRST202", "PGRST204"}
+
+# Header con cui un admin chiede di lavorare come un altro utente ("Visualizza" nel pannello Admin).
+HEADER_VISUALIZZA = "X-Visualizza-Utente"
+
+MESSAGGI_STATO = {
+    "in_attesa": "Il tuo account è in attesa di approvazione: potrai accedere appena un amministratore lo avrà abilitato.",
+    "bloccato": "Il tuo account è stato bloccato. Per informazioni contatta l'amministratore.",
+}
 
 
 @dataclass(frozen=True)
 class UtenteAutenticato:
     id: str
     email: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Profilo:
+    id: str
+    company_id: str
+    ruolo: str  # "admin" | "user"
+    stato: str  # "in_attesa" | "attivo" | "bloccato"
+
+
+@dataclass(frozen=True)
+class Contesto:
+    """Per conto di chi si lavora in questa richiesta.
+
+    `utente` e' l'account di cui si leggono e modificano i dati. Di norma e' chi ha fatto
+    l'accesso; quando un admin usa "Visualizza", e' l'utente visualizzato e `admin` e' l'admin."""
+    utente: Profilo
+    admin: Optional[Profilo] = None
+
+
+def migrazione_mancante(e: Exception) -> bool:
+    return getattr(e, "code", None) in ERRORI_MIGRAZIONE_MANCANTE
+
+
+def _leggi_profilo(user_id: str) -> Optional[Profilo]:
+    try:
+        righe = supabase.table("users").select("company_id, stato, role(codice)").eq("id", user_id).execute().data
+    except Exception as e:
+        if not migrazione_mancante(e):
+            raise
+        righe = supabase.table("users").select("company_id").eq("id", user_id).execute().data
+        return Profilo(id=user_id, company_id=righe[0]["company_id"], ruolo="user", stato="attivo") if righe else None
+    if not righe:
+        return None
+    riga = righe[0]
+    return Profilo(
+        id=user_id,
+        company_id=riga["company_id"],
+        ruolo=(riga.get("role") or {}).get("codice") or "user",
+        stato=riga.get("stato") or "attivo",
+    )
+
+
+def carica_profilo(user_id: str, fresco: bool = False) -> Optional[Profilo]:
+    """Profilo dell'utente (None se non esiste). `fresco` salta la cache (es. al login)."""
+    adesso = time.monotonic()
+    if not fresco:
+        with _cache_lock:
+            in_memoria = _cache_profili.get(user_id)
+        if in_memoria and in_memoria[1] > adesso:
+            return in_memoria[0]
+    profilo = _leggi_profilo(user_id)
+    if profilo:
+        with _cache_lock:
+            _cache_profili[user_id] = (profilo, adesso + _DURATA_CACHE_PROFILO)
+    return profilo
+
+
+def dimentica_profilo(user_id: str) -> None:
+    """Da chiamare dopo aver cambiato stato o ruolo di un utente: vale dalla richiesta successiva."""
+    with _cache_lock:
+        _cache_profili.pop(user_id, None)
+
+
+def errore_stato_account(stato: str) -> HTTPException:
+    """403 per un account non attivo. `codice` permette al frontend di disconnettere l'utente e
+    spiegargli il motivo nella pagina di accesso."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"codice": f"account_{stato}", "messaggio": MESSAGGI_STATO.get(stato, "Account non attivo.")},
+    )
 
 
 def _non_autorizzato(dettaglio: str) -> HTTPException:
@@ -117,34 +202,55 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise _non_autorizzato(err_msg)
 
 
-def get_current_company_id(user: UtenteAutenticato = Depends(get_current_user)) -> str:
-    """
-    Retrieves the company_id associated with the currently authenticated user.
-    Assumes a public.users table maps auth.users.id to company_id.
-    """
-    adesso = time.monotonic()
-    with _cache_lock:
-        in_memoria = _cache_azienda.get(user.id)
-    if in_memoria and in_memoria[1] > adesso:
-        return in_memoria[0]
-
+def get_profilo(user: UtenteAutenticato = Depends(get_current_user)) -> Profilo:
+    """Profilo di chi ha fatto l'accesso, solo se l'account e' attivo: un account in attesa o
+    bloccato viene fermato a ogni richiesta, anche con un token ancora valido."""
     try:
-        response = supabase.table("users").select("company_id").eq("id", user.id).execute()
-
-        if not response.data or len(response.data) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="User does not belong to any company"
-            )
-        company_id = response.data[0]["company_id"]
+        profilo = carica_profilo(user.id)
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error fetching company data: {str(e)}"
-        )
+        logger.error(f"Errore lettura profilo utente: {traceback.format_exc()}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error fetching user data: {e}")
+    if not profilo:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User does not belong to any company")
+    if profilo.stato != "attivo":
+        raise errore_stato_account(profilo.stato)
+    return profilo
 
-    with _cache_lock:
-        _cache_azienda[user.id] = (company_id, adesso + _DURATA_CACHE_AZIENDA)
-    return company_id
+
+def _errore_visualizzazione(codice: str, messaggio: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={"codice": codice, "messaggio": messaggio})
+
+
+def get_contesto(request: Request, profilo: Profilo = Depends(get_profilo)) -> Contesto:
+    """Account per conto del quale si lavora. Con l'header X-Visualizza-Utente un admin lavora
+    come quell'utente (pulsante "Visualizza" del pannello Admin): lo si verifica a ogni richiesta,
+    quindi chi non e' admin (o non lo e' piu') non puo' usarlo."""
+    visualizzato_id = (request.headers.get(HEADER_VISUALIZZA) or "").strip()
+    if not visualizzato_id or visualizzato_id == profilo.id:
+        return Contesto(utente=profilo)
+
+    if profilo.ruolo != "admin":
+        raise _errore_visualizzazione(
+            "visualizzazione_non_consentita", "Solo un amministratore può visualizzare l'account di un altro utente."
+        )
+    try:
+        uuid.UUID(visualizzato_id)
+        visualizzato = carica_profilo(visualizzato_id)
+    except ValueError:
+        visualizzato = None
+    if not visualizzato or visualizzato.ruolo == "admin":
+        raise _errore_visualizzazione("visualizzazione_non_valida", "Questo account non è disponibile per la visualizzazione.")
+    return Contesto(utente=visualizzato, admin=profilo)
+
+
+def get_current_company_id(contesto: Contesto = Depends(get_contesto)) -> str:
+    """Azienda di cui si leggono e modificano i dati (quella dell'utente visualizzato, se un admin
+    sta usando "Visualizza")."""
+    return contesto.utente.company_id
+
+
+def richiedi_admin(profilo: Profilo = Depends(get_profilo)) -> Profilo:
+    """Per le funzioni del pannello Admin: sempre l'identita' reale, mai quella visualizzata."""
+    if profilo.ruolo != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Funzione riservata agli amministratori.")
+    return profilo
