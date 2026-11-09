@@ -146,8 +146,10 @@ def _verifica_locale(token: str) -> Optional[UtenteAutenticato]:
 
     try:
         chiave = _chiavi_pubbliche.get_signing_key_from_jwt(token).key
-    except jwt.PyJWKClientError as e:
-        logger.warning(f"Chiavi pubbliche Supabase non disponibili, verifica tramite Supabase: {e}")
+    except jwt.PyJWTError as e:
+        # Chiavi non scaricabili, chiave del token non trovata, oppure manca il pacchetto
+        # `cryptography` (necessario per ES256): non e' un token non valido, decide Supabase.
+        logger.warning(f"Verifica locale del token non disponibile, verifica tramite Supabase: {e}")
         return None
 
     try:

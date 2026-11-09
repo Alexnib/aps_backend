@@ -3,7 +3,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from routers import admin, auth, clienti, cantieri, operai, mezzi, fornitori, rapportini, dashboard, import_pdf, materiali, sal, subappalti, subappaltatori
+from routers import admin, auth, whatsapp, clienti, cantieri, operai, mezzi, fornitori, rapportini, dashboard, import_pdf, materiali, sal, subappalti, subappaltatori
 
 app = FastAPI(title="APS Light API", description="API per l'app gestionale APS Light")
 
@@ -42,6 +42,7 @@ app.include_router(sal.router)
 app.include_router(subappalti.router)
 app.include_router(subappaltatori.router)
 app.include_router(admin.router)
+app.include_router(whatsapp.router)
 
 @app.get("/")
 def read_root():
