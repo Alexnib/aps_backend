@@ -63,6 +63,16 @@ async def ricevi_webhook(request: Request, background: BackgroundTasks):
                 continue
             for messaggio in valore.get("messages") or []:
                 background.add_task(gestisci_messaggio, messaggio)
+            # Meta accetta l'invio e solo dopo, con una notifica a parte, dice se non e' riuscito a
+            # consegnarlo (es. account bloccato): senza questo log l'utente non riceve nulla e nei
+            # log non resta traccia del perche'.
+            for stato in valore.get("statuses") or []:
+                if stato.get("status") == "failed":
+                    motivi = "; ".join(
+                        f"{e.get('code')} {e.get('title') or e.get('message') or ''}".strip()
+                        for e in stato.get("errors") or []
+                    )
+                    logger.warning(f"WhatsApp: messaggio {stato.get('id')} non consegnato: {motivi or 'motivo non indicato'}")
     return {"ok": True}
 
 
